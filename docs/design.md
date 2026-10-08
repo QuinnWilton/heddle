@@ -324,6 +324,23 @@ end
 
 Each variant is a tag and its fields, written `name: codec`. The field names document each tuple position; the decoded value is the tuple itself, so `{:rect, 3, 4}` is a rectangle of width 3 and height 4.
 
+Variants can be built from other codecs. A module name in a field stands for that module's codec (see Nested structs), compiled to a call to its decoder, so a union can carry structs, lists of them, other unions, and itself:
+
+```elixir
+defmodule MyApp.Drawing do
+  use Heddle.Schema
+
+  defunion do
+    variant :empty
+    variant :circle, center: MyApp.Point, radius: Heddle.integer(min: 1)
+    variant :polygon, points: Heddle.list(MyApp.Point, max: 64)
+    variant :group, shapes: Heddle.list(MyApp.Drawing, max: 16)
+  end
+end
+```
+
+Variant fields are not alternatives of a choice, so naming another module there needs nothing from it at compile time, and a union may name itself: `:group` nests drawings up to the call's `max_depth`.
+
 v1 supports one union encoding: tagged tuples, with nullary variants as bare atoms. It is idiomatic Erlang and dispatches on the leading atom, so FIRST sets are trivially disjoint. Map-based and untagged encodings are deferred.
 
 ## Dependent codecs with `bind`

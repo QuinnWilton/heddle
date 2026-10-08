@@ -72,6 +72,40 @@ no fields is the bare atom (`:empty`); the others are tuples of the tag and
 the field values in order (`{:circle, radius}`, `{:rect, width, height}`).
 The field names document each position; the values carry no names.
 
+Variants can be built from other codecs. A module name in a field stands for
+that module's codec (a schema, a union or a derived struct), so a union can
+carry structs, lists of them, and itself:
+
+```elixir
+defmodule MyApp.Point do
+  use Heddle.Schema
+
+  defschema as: :tuple, tag: :point do
+    field :x, Heddle.integer(min: -10_000, max: 10_000)
+    field :y, Heddle.integer(min: -10_000, max: 10_000)
+  end
+end
+
+defmodule MyApp.Drawing do
+  use Heddle.Schema
+
+  defunion do
+    variant :empty
+    variant :circle, center: MyApp.Point, radius: Heddle.integer(min: 1)
+    variant :polygon, points: Heddle.list(MyApp.Point, max: 64)
+    variant :group, shapes: Heddle.list(MyApp.Drawing, max: 16)
+  end
+end
+
+drawing = {:group, [{:circle, %MyApp.Point{x: 0, y: 0}, 5}, :empty]}
+{:ok, iodata} = Heddle.encode(MyApp.Drawing.codec(), drawing)
+```
+
+Each module's codec is compiled once and called from the others, so `:group`
+nests drawings to any depth the call's `max_depth` allows, and every list is
+bounded by its `max:`. On the wire a `%MyApp.Point{}` is `{:point, x, y}`,
+since `Point` uses the tuple layout.
+
 ### Structs you own, and structs you don't
 
 ```elixir

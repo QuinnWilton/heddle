@@ -187,3 +187,27 @@ defmodule Heddle.Test.Producers do
     Heddle.list(Heddle.enum([:http, :https], unknown: :keep), max: 10)
   end
 end
+
+defmodule Heddle.Test.Point2D do
+  @moduledoc false
+  use Heddle.Schema
+
+  defschema as: :tuple, tag: :point do
+    field(:x, Heddle.integer(min: -10_000, max: 10_000))
+    field(:y, Heddle.integer(min: -10_000, max: 10_000))
+  end
+end
+
+defmodule Heddle.Test.Drawing do
+  @moduledoc false
+  # A union whose variants are built from other codecs: a struct schema, a
+  # list of it, and the union itself, for nesting.
+  use Heddle.Schema
+
+  defunion do
+    variant(:empty)
+    variant(:circle, center: Heddle.Test.Point2D, radius: Heddle.integer(min: 1, max: 10_000))
+    variant(:polygon, points: Heddle.list(Heddle.Test.Point2D, max: 64))
+    variant(:group, shapes: Heddle.list(Heddle.Test.Drawing, max: 16))
+  end
+end

@@ -181,6 +181,15 @@ defmodule Heddle.Schema do
   no fields is the bare atom (`:empty`); the others are tuples of the tag and
   the field values in order (`{:circle, radius}`, `{:rect, width, height}`).
   The field names document each position; the values carry no names.
+
+  Fields can be other codecs. A module name stands for that module's codec
+  (a schema, a union or a derived struct), so variants can carry structs and
+  lists of them, and a union can name itself to nest:
+
+      defunion do
+        variant :circle, center: MyApp.Point, radius: Heddle.integer(min: 1)
+        variant :group, shapes: Heddle.list(MyApp.Drawing, max: 16)
+      end
   """
   defmacro defunion(do: block) do
     variants =

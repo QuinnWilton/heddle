@@ -75,6 +75,30 @@ defmodule Heddle.CompilerTest do
       assert Heddle.Codec.codec(%User{}) == Heddle.codec_for(User)
     end
 
+    test "union variants built from other codecs, including the union itself" do
+      alias Heddle.Test.{Drawing, Point2D}
+
+      p = fn x, y -> %Point2D{x: x, y: y} end
+
+      shapes = [
+        :empty,
+        {:circle, p.(0, 0), 5},
+        {:polygon, [p.(0, 0), p.(4, 0), p.(0, 3)]},
+        {:group, [{:circle, p.(1, 1), 2}, {:group, [:empty]}]}
+      ]
+
+      agree!(Drawing.codec(), shapes)
+
+      assert :erlang.binary_to_term(bytes(Drawing.codec(), {:circle, p.(0, 0), 5})) ==
+               {:circle, {:point, 0, 0}, 5}
+
+      assert {:error, %Heddle.DecodeError{path: [1, 0, 2], reason: :out_of_range}} =
+               Heddle.decode(
+                 Drawing.codec(),
+                 :erlang.term_to_binary({:group, [{:circle, {:point, 0, 0}, 0}]})
+               )
+    end
+
     test "codecs for structs you don't own" do
       uri = %URI{scheme: :https, host: "example.com"}
       agree!(UriCodecs.uri_codec(), [uri, %{uri | scheme: {:unknown, "gopher"}}])
