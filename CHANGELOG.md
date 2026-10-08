@@ -11,3 +11,5 @@
 - `decode/3`, `encode/2`, `project/2` and `conforms?/2`, with call-site
   limits (`Heddle.Limits`) and exact `Heddle.DecodeError` locations.
 - `Heddle.Interpreter`, the reference semantics.
+- `Heddle.Gen`, `Heddle.Laws` and `Heddle.Check` for property and
+  differential testing; `Heddle.Lint` for unbounded positions.
