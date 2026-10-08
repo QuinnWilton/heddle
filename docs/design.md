@@ -396,12 +396,13 @@ Codecs built at runtime get the same static checks when each combinator is calle
 
 ### Compilation
 
-Each IR node becomes a private function following one calling convention, `decode(rest, depth, nodes, lim)` and `encode(value)`, shared with the interpreter so the two backends can call each other (compiled references from interpreted codecs, opaque binds from compiled ones).
+Each IR node becomes a private function. Decoders follow one calling convention, `decode(rest, depth, nodes, lim)`, shared with the interpreter so the two backends can call each other (compiled references from interpreted codecs, opaque binds from compiled ones). Compiled encoders take an accumulator, `encode(value, acc)`, and append to it: the BEAM appends to a binary in place, so one growing binary beats nested iodata flattened at the end, and several payload shapes encode faster than `term_to_binary`. Where they call the interpreter's iodata encoders (slow paths, opaque binds), the result is appended.
 
 - **Literals are byte patterns.** An atom literal becomes clauses such as `<<119, 2, "ok", rest::binary>>`, one per atom tag its name can be written with. A `one_of` becomes a `case` over its alternatives' FIRST sets as byte patterns: atom spellings, tag bytes, and tuple headers followed by a tag's spellings.
 - **Leaves have inline fast paths.** Integers, floats and binaries match their common encodings inline; anything else, and every failure, falls back to the same shared reader the interpreter calls, so both backends report the same error at the same offset.
 - **Loops keep the match context.** List loops match leaf elements in their head, and every loop clause starts with a binary match, so the BEAM reuses one match context across iterations instead of creating a sub-binary per element.
 - **Structs decode into their template.** A struct laid out as a map starts from its defaults and records the keys it has seen in a bitmask, for the duplicate and missing-key checks. Its encoder writes keys in an order fixed at compile time.
+- **Fused clauses.** A map key followed by a leaf value, a tuple of leaves, and a union alternative that is a literal or a tuple of leaves each match in one clause, with every limit check as a guard; encoders write such shapes in one append. Where output order and error order differ (struct fields are written in key-byte order but reported in declared order), a failure reruns the shared encoder, which reports the canonical error.
 - **SWAR scans.** UTF-8 validation skips ASCII 56 bytes at a time before handing the rest to `String.valid?/1`, and a `STRING_EXT` whose element codec is an integer range is checked seven bytes per word. Words are 56 bits so they stay small integers.
 - **Binding-time analysis of `bind`** compiles sequences from their continuations' source, as described under Dependent codecs.
 
