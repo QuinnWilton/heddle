@@ -112,6 +112,7 @@ defmodule Heddle.Schema do
       end)
 
     struct_opts = Keyword.take(opts, [:as, :tag])
+    record_struct_info(__CALLER__, struct_fields)
 
     quote do
       defstruct unquote(struct_fields)
@@ -126,6 +127,19 @@ defmodule Heddle.Schema do
           do: unquote(Macro.escape(%Heddle{node: {:ref, __CALLER__.module, :codec}}))
       end
     end
+  end
+
+  # The codec in the block defschema returns is compiled before the block's
+  # defstruct runs, so the compiler is told the struct's fields and defaults
+  # here; defaults are evaluated as defstruct would evaluate them.
+  defp record_struct_info(env, struct_fields) do
+    info =
+      Enum.map(struct_fields, fn {field, default} ->
+        {value, _} = Code.eval_quoted(default, [], env)
+        %{field: field, default: value, required: false}
+      end)
+
+    Process.put({:heddle_struct_info, env.module}, info)
   end
 
   defp default_value(:none), do: nil
@@ -469,17 +483,32 @@ defmodule Heddle.Schema do
   end
 
   defp encode_clauses(names) do
-    for(
-      name <- names,
-      do:
+    two =
+      for name <- names do
         quote(
           do:
             def(__heddle_encode__(unquote(name), value),
-              do: unquote(Compiler.root_enc(name))(value)
+              do: unquote(Compiler.root_enc(name))(value, "")
             )
         )
-    ) ++
-      [missing(:__heddle_encode__, [Macro.var(:_value, __MODULE__)])]
+      end
+
+    three =
+      for name <- names do
+        quote(
+          do:
+            def(__heddle_encode__(unquote(name), value, acc),
+              do: unquote(Compiler.root_enc(name))(value, acc)
+            )
+        )
+      end
+
+    two ++
+      [missing(:__heddle_encode__, [Macro.var(:_value, __MODULE__)])] ++
+      three ++
+      [
+        missing(:__heddle_encode__, [Macro.var(:_value, __MODULE__), Macro.var(:_acc, __MODULE__)])
+      ]
   end
 
   defp summary_clauses(codecs) do

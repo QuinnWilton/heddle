@@ -438,7 +438,14 @@ defmodule Heddle do
   @spec decode(t(term(), o), binary(), Limits.t() | [Limits.option()]) ::
           {:ok, o} | {:error, DecodeError.t()}
         when o: term()
-  def decode(codec, binary, opts \\ []) when is_binary(binary) do
+  def decode(codec, binary, opts \\ [])
+
+  def decode(%__MODULE__{node: {:ref, module, name}}, binary, opts) when is_binary(binary) do
+    {max_bytes, lim} = Heddle.Runtime.compiled_limits(opts)
+    Heddle.Runtime.run_compiled(binary, max_bytes, lim, module, name)
+  end
+
+  def decode(codec, binary, opts) when is_binary(binary) do
     Interpreter.decode(IR.codec!(codec, "Heddle.decode/3"), binary, opts, :compiled)
   end
 
@@ -459,6 +466,13 @@ defmodule Heddle do
   their encoded bytes, never compressed.
   """
   @spec encode(t(i, term()), i) :: {:ok, iodata()} | {:error, EncodeError.t()} when i: term()
+  def encode(%__MODULE__{node: {:ref, module, name}}, value) do
+    case module.__heddle_encode__(name, value, <<131>>) do
+      {:ok, _y, binary} -> {:ok, binary}
+      {:error, {path, reason}} -> {:error, %EncodeError{path: path, reason: reason}}
+    end
+  end
+
   def encode(codec, value) do
     case Interpreter.encode(IR.codec!(codec, "Heddle.encode/2"), value, :compiled) do
       {:ok, _y, iodata} -> {:ok, [<<131>> | iodata]}

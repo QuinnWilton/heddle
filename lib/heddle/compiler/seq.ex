@@ -137,29 +137,37 @@ defmodule Heddle.Compiler.Seq do
   @spec enc(Heddle.t(), atom() | nil, Heddle.t(), term()) :: Heddle.Compiler.caller()
   def enc(codec, tag, seq, pctx) do
     env = %{vars: %{}, budget: 1, expected: Compiler.expected_of(codec, nil)}
-    start = if tag, do: [Heddle.ETF.encode_atom(tag)], else: []
-    i = length(start)
+    # Elements append to `elems`; the step index is the element count, known
+    # along each path, so the tuple header is written once they are done.
+    start = if tag, do: Heddle.ETF.encode_atom(tag), else: ""
+    i = if tag, do: 1, else: 0
 
     body =
       quote context: Compiler do
         elems = unquote(start)
 
         case unquote(enc_ir(seq, i, env)) do
-          {:ok, y, elems} -> {:ok, y, [Heddle.ETF.tuple_header(length(elems)) | elems]}
-          error -> error
+          {:ok, y, elems, count} ->
+            {:ok, y, <<acc::binary, Heddle.ETF.tuple_header(count)::binary, elems::binary>>}
+
+          error ->
+            error
         end
       end
 
     Compiler.new_encoder(pctx, [{quote(context: Compiler, do: value), nil, body}])
   end
 
-  defp enc_ir(%Heddle{node: {:pure, value}}, _i, _env),
-    do:
-      quote(context: Compiler, do: {:ok, unquote(Compiler.escape!(value)), :lists.reverse(elems)})
+  defp enc_ir(%Heddle{node: {:pure, value}}, i, _env),
+    do: quote(context: Compiler, do: {:ok, unquote(Compiler.escape!(value)), elems, unquote(i)})
 
   defp enc_ir(%Heddle{node: {:bind, codec, k}}, i, env) do
     call =
-      Compiler.call_enc(Compiler.enc_caller(codec, nil), quote(context: Compiler, do: value), nil)
+      Compiler.call_enc(
+        Compiler.enc_caller(codec, nil),
+        quote(context: Compiler, do: value),
+        quote(context: Compiler, do: elems)
+      )
 
     enc_step(call, finite_values(codec), k, i, env)
   end
@@ -169,8 +177,7 @@ defmodule Heddle.Compiler.Seq do
 
     quote context: Compiler do
       case unquote(call) do
-        {:ok, unquote(y), io} ->
-          elems = [io | elems]
+        {:ok, unquote(y), elems} ->
           unquote(continuation(:enc, k, y, finite, i + 1, env))
 
         error ->
@@ -288,12 +295,16 @@ defmodule Heddle.Compiler.Seq do
 
   defp opaque_continuation(:enc, fun_ast, y, i, _env) do
     quote context: Compiler do
-      Heddle.Interpreter.enc_seq(
-        unquote(fun_ast).(unquote(y)),
-        value,
-        :compiled,
-        unquote(i),
-        elems
+      Heddle.Runtime.continue_enc(
+        Heddle.Interpreter.enc_seq(
+          unquote(fun_ast).(unquote(y)),
+          value,
+          :compiled,
+          unquote(i),
+          []
+        ),
+        elems,
+        unquote(i)
       )
     end
   end
@@ -304,7 +315,7 @@ defmodule Heddle.Compiler.Seq do
       {{:., _, [Heddle, :pure]}, _, [expr]} ->
         if dir == :dec,
           do: dec_pure(expr, i, env),
-          else: quote(context: Compiler, do: {:ok, unquote(expr), :lists.reverse(elems)})
+          else: quote(context: Compiler, do: {:ok, unquote(expr), elems, unquote(i)})
 
       {{:., meta, [Heddle, :bind]}, _, [codec_ast, k_ast]} ->
         {call, finite} = step_call(dir, codec_ast, meta, env)
@@ -335,7 +346,12 @@ defmodule Heddle.Compiler.Seq do
           else:
             quote(
               context: Compiler,
-              do: Heddle.Interpreter.enc_seq(unquote(other), value, :compiled, unquote(i), elems)
+              do:
+                Heddle.Runtime.continue_enc(
+                  Heddle.Interpreter.enc_seq(unquote(other), value, :compiled, unquote(i), []),
+                  elems,
+                  unquote(i)
+                )
             )
     end
   end
@@ -376,7 +392,11 @@ defmodule Heddle.Compiler.Seq do
             else:
               quote(
                 context: Compiler,
-                do: Heddle.Interpreter.enc(unquote(codec), value, :compiled)
+                do:
+                  Heddle.Runtime.lift(
+                    Heddle.Interpreter.enc(unquote(codec), value, :compiled),
+                    elems
+                  )
               )
 
         {call, nil}
@@ -393,7 +413,11 @@ defmodule Heddle.Compiler.Seq do
 
   defp static_call(:enc, codec),
     do:
-      Compiler.call_enc(Compiler.enc_caller(codec, nil), quote(context: Compiler, do: value), nil)
+      Compiler.call_enc(
+        Compiler.enc_caller(codec, nil),
+        quote(context: Compiler, do: value),
+        quote(context: Compiler, do: elems)
+      )
 
   defp param_call(dir, codec, params) do
     checks =
@@ -422,7 +446,7 @@ defmodule Heddle.Compiler.Seq do
           Compiler.call_enc(
             Compiler.enc_caller(codec, :param),
             quote(context: Compiler, do: value),
-            :param
+            quote(context: Compiler, do: elems)
           )
       end
 

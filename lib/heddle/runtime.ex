@@ -178,30 +178,7 @@ defmodule Heddle.Runtime do
   defp top(<<131, rest::binary>>, total, limits, mode, decode) do
     lim = lim(limits, mode)
 
-    case decode.(rest, 1, limits.max_nodes, lim) do
-      {:ok, value, <<>>, _} ->
-        {:ok, value}
-
-      {:ok, _, trailing, _} ->
-        {:error,
-         %DecodeError{
-           path: [],
-           offset: total - byte_size(trailing),
-           reason: :trailing_bytes,
-           expected: [:end_of_input],
-           found: ETF.describe(trailing)
-         }}
-
-      {:error, {reason, expected, found, remaining, path}} ->
-        {:error,
-         %DecodeError{
-           path: path,
-           offset: total - remaining,
-           reason: reason,
-           expected: expected,
-           found: found
-         }}
-    end
+    finish_decode(decode.(rest, 1, limits.max_nodes, lim), total)
   end
 
   defp top(bin, _total, _, _, _) do
@@ -229,6 +206,93 @@ defmodule Heddle.Runtime do
        reason: reason,
        expected: [:term],
        found: ETF.describe(rest)
+     }}
+  end
+
+  @default_compiled {1_048_576, {32, 10_000, true, :compiled}}
+
+  # The limits for a compiled decode, as {max_bytes, lim}: a constant for no
+  # options, a direct parse for keyword options, and Heddle.Limits.new/1 for
+  # anything else, which also raises its errors.
+  @doc false
+  @spec compiled_limits(Heddle.Limits.t() | [Heddle.Limits.option()]) :: {pos_integer(), lim()}
+  def compiled_limits([]), do: @default_compiled
+  def compiled_limits(opts) when is_list(opts), do: parse_limits(opts, @default_compiled, opts)
+
+  def compiled_limits(%Heddle.Limits{} = limits),
+    do: {limits.max_bytes, lim(limits, :compiled)}
+
+  defp parse_limits([], acc, _all), do: acc
+
+  defp parse_limits([{:max_bytes, n} | rest], {_, lim}, all) when is_integer(n) and n > 0,
+    do: parse_limits(rest, {n, lim}, all)
+
+  defp parse_limits([{:max_depth, n} | rest], {bytes, lim}, all) when is_integer(n) and n > 0,
+    do: parse_limits(rest, {bytes, put_elem(lim, 0, n)}, all)
+
+  defp parse_limits([{:max_nodes, n} | rest], {bytes, lim}, all) when is_integer(n) and n > 0,
+    do: parse_limits(rest, {bytes, put_elem(lim, 1, n)}, all)
+
+  defp parse_limits([{:binaries, mode} | rest], {bytes, lim}, all) when mode in [:copy, :ref],
+    do: parse_limits(rest, {bytes, put_elem(lim, 2, mode == :copy)}, all)
+
+  defp parse_limits(_, _acc, all), do: compiled_limits(Heddle.Limits.new(all))
+
+  # Decodes with a compiled codec's root, without building a closure.
+  @doc false
+  @spec run_compiled(binary(), pos_integer(), lim(), module(), atom()) ::
+          {:ok, term()} | {:error, DecodeError.t()}
+  def run_compiled(binary, max_bytes, lim, module, name) when byte_size(binary) > max_bytes do
+    _ = {lim, module, name}
+
+    {:error,
+     %DecodeError{
+       path: [],
+       offset: 0,
+       reason: :max_bytes,
+       expected: [{:max_bytes, max_bytes}],
+       found: {:bytes, byte_size(binary)}
+     }}
+  end
+
+  def run_compiled(<<131, tag, _::binary>> = binary, _max_bytes, _lim, _module, _name)
+      when tag in [80, 68],
+      do: top(binary, byte_size(binary), nil, nil, nil)
+
+  def run_compiled(
+        <<131, rest::binary>> = binary,
+        _max_bytes,
+        {_, max_nodes, _, _} = lim,
+        module,
+        name
+      ) do
+    finish_decode(module.__heddle_decode__(name, rest, 1, max_nodes, lim), byte_size(binary))
+  end
+
+  def run_compiled(binary, _max_bytes, _lim, _module, _name),
+    do: top(binary, byte_size(binary), nil, nil, nil)
+
+  defp finish_decode({:ok, value, <<>>, _}, _total), do: {:ok, value}
+
+  defp finish_decode({:ok, _, trailing, _}, total) do
+    {:error,
+     %DecodeError{
+       path: [],
+       offset: total - byte_size(trailing),
+       reason: :trailing_bytes,
+       expected: [:end_of_input],
+       found: ETF.describe(trailing)
+     }}
+  end
+
+  defp finish_decode({:error, {reason, expected, found, remaining, path}}, total) do
+    {:error,
+     %DecodeError{
+       path: path,
+       offset: total - remaining,
+       reason: reason,
+       expected: expected,
+       found: found
      }}
   end
 
@@ -654,18 +718,148 @@ defmodule Heddle.Runtime do
   # `limit` elements, or :error; lo..hi lies within 0..255.
   @doc false
   @spec byte_list(term(), byte(), byte(), non_neg_integer()) :: {:ok, binary()} | :error
-  def byte_list([_ | _] = list, lo, hi, limit) do
-    if bytes_ok?(list, lo, hi, limit, 0), do: {:ok, :erlang.list_to_binary(list)}, else: :error
-  end
-
+  def byte_list([_ | _] = list, lo, hi, limit), do: append_bytes(list, lo, hi, limit, <<>>)
   def byte_list(_value, _lo, _hi, _limit), do: :error
 
-  defp bytes_ok?([b | rest], lo, hi, limit, n)
-       when is_integer(b) and b >= lo and b <= hi and n < limit,
-       do: bytes_ok?(rest, lo, hi, limit, n + 1)
+  defguardp byte_in(b, lo, hi) when is_integer(b) and b >= lo and b <= hi
 
-  defp bytes_ok?([], _lo, _hi, _limit, _n), do: true
-  defp bytes_ok?(_, _lo, _hi, _limit, _n), do: false
+  # Eight elements per step, appended in place.
+  defp append_bytes([a, b, c, d, e, f, g, h | rest], lo, hi, limit, out)
+       when byte_in(a, lo, hi) and byte_in(b, lo, hi) and byte_in(c, lo, hi) and
+              byte_in(d, lo, hi) and
+              byte_in(e, lo, hi) and byte_in(f, lo, hi) and byte_in(g, lo, hi) and
+              byte_in(h, lo, hi) and
+              byte_size(out) + 8 <= limit,
+       do: append_bytes(rest, lo, hi, limit, <<out::binary, a, b, c, d, e, f, g, h>>)
+
+  defp append_bytes([b | rest], lo, hi, limit, out)
+       when byte_in(b, lo, hi) and byte_size(out) < limit,
+       do: append_bytes(rest, lo, hi, limit, <<out::binary, b>>)
+
+  defp append_bytes([], _lo, _hi, _limit, out), do: {:ok, out}
+  defp append_bytes(_, _lo, _hi, _limit, _out), do: :error
+
+  ## Accumulator encoding
+  #
+  # Compiled encoders append to a binary instead of building iodata. These
+  # helpers serve them; a fast path that cannot finish (an error, or a
+  # decoded value that differs from the input) calls `slow`, the iodata
+  # encoder the interpreter shares, which computes the canonical result.
+
+  # An iodata encoder's result, appended to `acc`.
+  @doc false
+  @spec lift(enc_result(), binary()) :: {:ok, term(), binary()} | {:error, {[term()], term()}}
+  def lift({:ok, y, io}, acc) when is_binary(io), do: {:ok, y, <<acc::binary, io::binary>>}
+  def lift({:ok, y, io}, acc), do: {:ok, y, <<acc::binary, IO.iodata_to_binary(io)::binary>>}
+  def lift(error, _acc), do: error
+
+  # The rest of a sequence the interpreter encoded, after compiled steps
+  # wrote `count` elements to `elems`.
+  @doc false
+  @spec continue_enc({:ok, term(), [iodata()]} | {:error, term()}, binary(), non_neg_integer()) ::
+          {:ok, term(), binary(), non_neg_integer()} | {:error, term()}
+  def continue_enc({:ok, y, rest}, elems, count),
+    do: {:ok, y, <<elems::binary, IO.iodata_to_binary(rest)::binary>>, count + length(rest)}
+
+  def continue_enc(error, _elems, _count), do: error
+
+  # `ys` stays :same while every decoded element is the input element.
+  @doc false
+  @spec track_y(:same | list(), term(), term(), list(), non_neg_integer()) :: :same | list()
+  def track_y(:same, y, x, _original, _i) when y === x, do: :same
+  def track_y(:same, y, _x, original, i), do: [y | original |> Enum.take(i) |> :lists.reverse()]
+  def track_y(ys, y, _x, _original, _i), do: [y | ys]
+
+  # SMALL_INTEGER_EXT encodings, concatenated, as their bytes.
+  @doc false
+  @spec untag_small(binary()) :: binary()
+  def untag_small(out), do: for(<<97, b <- out>>, into: <<>>, do: <<b>>)
+
+  # A map with named atom keys; `entries` are {key, key_bytes, encoder} in
+  # key-byte order.
+  @doc false
+  @spec append_map(
+          term(),
+          binary(),
+          [{atom(), binary(), (term(), binary() -> term())}],
+          [atom()],
+          (-> enc_result())
+        ) ::
+          {:ok, term(), binary()} | {:error, {[term()], term()}}
+  def append_map(value, acc, entries, required, slow)
+      when is_map(value) and not is_map_key(value, :__struct__) do
+    present = Enum.count(entries, fn {key, _, _} -> is_map_key(value, key) end)
+
+    with true <- present == map_size(value) and Enum.all?(required, &is_map_key(value, &1)),
+         {:ok, out, true} <-
+           append_entries(entries, value, <<acc::binary, 116, present::32>>, true) do
+      {:ok, value, out}
+    else
+      _ -> lift(slow.(), acc)
+    end
+  end
+
+  def append_map(_value, acc, _entries, _required, slow), do: lift(slow.(), acc)
+
+  defp append_entries([], _value, out, same), do: {:ok, out, same}
+
+  defp append_entries([{key, bytes, enc} | rest], value, out, same) do
+    case value do
+      %{^key => v} ->
+        case enc.(v, <<out::binary, bytes::binary>>) do
+          {:ok, y, out} -> append_entries(rest, value, out, same and y === v)
+          _ -> :error
+        end
+
+      _ ->
+        append_entries(rest, value, out, same)
+    end
+  end
+
+  # A map_of. Keys are encoded on their own and sorted by their bytes, then
+  # each value is encoded straight into the output after its key, so a
+  # value is copied once.
+  @doc false
+  @spec append_map_of(
+          term(),
+          binary(),
+          non_neg_integer() | nil,
+          (term(), binary() -> term()),
+          (term(), binary() -> term()),
+          (-> enc_result())
+        ) ::
+          {:ok, term(), binary()} | {:error, {[term()], term()}}
+  def append_map_of(value, acc, max, enc_key, enc_value, slow)
+      when is_map(value) and not is_map_key(value, :__struct__) and
+             (max == nil or map_size(value) <= max) do
+    with {:ok, keyed} <- keys(:maps.to_list(value), enc_key, []),
+         {:ok, out} <-
+           values(:lists.keysort(1, keyed), enc_value, <<acc::binary, 116, map_size(value)::32>>) do
+      {:ok, value, out}
+    else
+      _ -> lift(slow.(), acc)
+    end
+  end
+
+  def append_map_of(_value, acc, _max, _enc_key, _enc_value, slow), do: lift(slow.(), acc)
+
+  defp keys([], _enc_key, acc), do: {:ok, acc}
+
+  defp keys([{k, v} | rest], enc_key, acc) do
+    case enc_key.(k, <<>>) do
+      {:ok, yk, key_bytes} when yk === k -> keys(rest, enc_key, [{key_bytes, v} | acc])
+      _ -> :slow
+    end
+  end
+
+  defp values([], _enc_value, out), do: {:ok, out}
+
+  defp values([{key_bytes, v} | rest], enc_value, out) do
+    case enc_value.(v, <<out::binary, key_bytes::binary>>) do
+      {:ok, yv, out} when yv === v -> values(rest, enc_value, out)
+      _ -> :slow
+    end
+  end
 
   # `required` and `optional` list {key, encoder}.
   @doc false
