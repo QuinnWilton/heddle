@@ -45,6 +45,7 @@ defmodule Heddle.MixProject do
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.35", only: :dev, runtime: false},
+      {:benchee, "~> 1.3", only: :dev, runtime: false},
       {:presubmit, "~> 0.2.2", only: [:dev, :test], runtime: false}
     ]
   end
