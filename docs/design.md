@@ -81,7 +81,7 @@ They recommend staying at or below deterministic context-free, where grammar equ
 A codec `Heddle.t(i, o)` encodes an `i` and decodes to an `o`. An aligned codec is `Heddle.t(a, a)`. Internally it is a first-order IR, so the same value can be interpreted, compiled to bit-syntax clauses, turned into a generator, or linted.
 
 ```elixir
-@opaque t(i, o)
+@type t(i, o)   # treat as opaque: the fields are internal
 ```
 
 ### Primitives
@@ -122,9 +122,13 @@ Heddle.from(codec, getter)        # which part of the value this codec encodes;
                                 # getter returns {:ok, part} | :error
 Heddle.field(:user_id)            # getter helper for a struct or map field
 Heddle.lazy(fn -> tree() end)     # recursion
-Heddle.bind(codec, fn v -> next end)
-                                # monadic: the next codec depends on a decoded value
+Heddle.tuple_seq(seq, tag: :t)    # a tuple read as a sequence of steps
+Heddle.bind(codec, fn v -> seq end)
+                                # a sequence step: the rest depends on a decoded value
+Heddle.pure(value)                # ends a sequence with its result
 ```
+
+`bind` and `pure` build sequences, which only `tuple_seq` runs: in ETF a run of terms exists only inside a container, and a tuple's arity says how many steps the sequence must take. Using a sequence where a codec is expected, or the reverse, raises `Heddle.CodecError` (H009).
 
 `from/2` is the profunctor `lmap` (Xia et al.'s `comap`) with a partial function: `Heddle.integer(min: 1) |> Heddle.from(Heddle.field(:user_id))`. A getter returning `:error` makes encoding fail cleanly outside the codec's domain.
 
@@ -135,7 +139,7 @@ Heddle.bind(codec, fn v -> next end)
 | Alternative `<\|>` | `Heddle.one_of/1`, restricted to deterministic choice |
 | `comap` / `upon` (Xia et al.), `lmap` | `Heddle.from/2` |
 | Monadic bind | `Heddle.bind/2` and the `Heddle.Syntax` block form |
-| `purify` | `Heddle.conforms?/2` |
+| `purify` | `Heddle.project/2` (and `Heddle.conforms?/2`) |
 | Bigenerator | `Heddle.Gen.from/1` |
 
 ## Decoding
@@ -185,7 +189,7 @@ Codec-declared bounds (for example `max: 100` on a list) and call-site bounds co
 ### Optional and defaulted fields
 
 - **Plain maps.** In `Heddle.map/1`, an absent `optional:` key is absent from the decoded map, and the encoder omits optional keys the value doesn't have.
-- **Struct layouts.** A struct field is required unless it declares `default:`. A defaulted field may be absent from the input and decodes to its default. The encoder always writes every serialized field, as `term_to_binary` does for a struct, so the VM decodes Heddle's output to a well-formed struct and backward round-tripping holds.
+- **Struct layouts.** A struct field is required unless it declares `default:`. A defaulted field may be absent from the input and decodes to its default. The encoder always writes every serialized field, as `term_to_binary` does for a struct, so backward round-tripping holds, and when the codec serializes every field the VM decodes Heddle's output to a well-formed struct. Fields the codec does not serialize are neither written nor accepted; decoding fills them from the struct's own defaults.
 
 ### Struct keys
 
@@ -194,18 +198,23 @@ A decoded map has a `:__struct__` key only when its codec is a struct layout, wh
 - `map_of` rejects a `:__struct__` key on decode whatever its key codec is, so `map_of(existing_atom(), existing_atom())` cannot decode `%{__struct__: SomeLoadedModule}`. Its encoder rejects maps with the key (that is, structs), so the encoder's domain matches what the decoder accepts.
 - Naming `:__struct__` in `Heddle.map/1`, or using an `enum` that contains it as a `map_of` key codec, is a compile error that points at `Heddle.struct/2`.
 
+### Integers
+
+An integer's declared bignum size is checked against the codec's range before its magnitude is read. An unbounded range is still capped at the VM's own limit, 524,280 magnitude bytes on 64-bit builds (high zero bytes included), which `binary_to_term` enforces too.
+
 ### Always rejected
 
 `NEW_FUN_EXT`, `EXPORT_EXT`, `LOCAL_EXT`, compressed terms (tag 80), pids, ports and refs, `RECORD_EXT`, distribution headers, `ATOM_CACHE_REF`, `FLOAT_EXT`, NaN and infinite floats, improper lists, duplicate map keys, map keys the schema doesn't name, a `:__struct__` key outside a struct layout, and trailing bytes after the term.
 
 ### Errors
 
-Errors carry the path, byte offset, expected set and what was found. Because choice is deterministic, the first failure is the only failure, so the reported location is exact. `found` quotes at most 64 bytes of the input: a longer value is reported as `{:truncated, prefix, byte_size}`, so logging an error never copies attacker-sized data.
+Errors carry the path, byte offset, a machine-readable reason, the expected set and what was found. Because choice is deterministic, the first failure is the only failure, so the reported location is exact. `found` quotes at most 64 bytes of the input: a longer value is reported as `{:truncated, prefix, byte_size}`, so logging an error never copies attacker-sized data.
 
 ```elixir
 {:error, %Heddle.DecodeError{
   path: [:roles, 3],
   offset: 41,
+  reason: :unexpected,
   expected: [{:atom, :admin}, {:atom, :editor}, {:atom, :viewer}],
   found: {:small_atom_utf8, "root"}
 }}
@@ -224,7 +233,7 @@ Encoding is partial: a value outside the codec's domain fails instead of produci
 Heddle.conforms?(codec, value)   # pure projection: validates without serializing
 ```
 
-- Output is deterministic for a given Heddle version: minimal integer tags, UTF-8 atom tags, map keys in term order. It does not depend on the OTP version, because Heddle writes ETF itself rather than calling term\_to\_binary. It is not a canonical format; output changes between Heddle versions are deliberate and listed in the changelog.
+- Output is deterministic for a given Heddle version: minimal integer tags, UTF-8 atom tags, map keys sorted by their encoded bytes. It does not depend on the OTP version, because Heddle writes ETF itself rather than calling term\_to\_binary. It is not a canonical format; output changes between Heddle versions are deliberate and listed in the changelog.
 - The encoder accepts exactly the values the decoder can return. `{:unknown, name}` is rejected when `name` is in the enum's set (`{:known_name, name}`) or is not a valid atom name (invalid UTF-8, or longer than 255 characters), and a `map_of` encoder rejects maps with a `:__struct__` key. `Heddle.Gen.from/1` never generates these values.
 - Output is never compressed.
 - Encoders return iodata, so large binaries are never copied.
@@ -365,7 +374,7 @@ defcodec hostname do
 end
 ```
 
-`defcodec name do ... end` defines `name/0`, which returns a codec value linked to the generated functions. A codec value (`Heddle.t/2`) carries its IR and, when compiled, a reference to its generated decoder and encoder; `Heddle.decode/3` and `Heddle.encode/2` dispatch on that reference.
+`defcodec name do ... end` defines `name/0`, which returns a codec value linked to the generated functions. A codec value (`t:Heddle.t/2`) carries its IR and, when compiled, a reference to its generated decoder and encoder; `Heddle.decode/3` and `Heddle.encode/2` dispatch on that reference.
 
 A codec expression inside these macros may contain only:
 
@@ -387,18 +396,20 @@ Codecs built at runtime get the same static checks when each combinator is calle
 
 ### Compilation
 
-Compiled codecs become specialized function clauses using bit syntax. Atom literals become byte patterns such as `<<119, 2, "ok", rest::binary>>`, with further clauses for the other three atom tags. The BEAM's match-context optimization then gives a single pass with no sub-binary allocation until a field is kept. The lowering is a small nanopass pipeline:
+Each IR node becomes a private function following one calling convention, `decode(rest, depth, nodes, lim)` and `encode(value)`, shared with the interpreter so the two backends can call each other (compiled references from interpreted codecs, opaque binds from compiled ones).
 
-1. Surface combinators to normalized IR (`from`, `iso` and `refine` pushed to leaves).
-2. Binding-time analysis of `bind` continuations: finite binds expanded into `one_of`, parameter binds lowered to parameterized nodes, opaque binds marked for the interpreter.
-3. `one_of` lowered to a decision tree on the first tag byte, then literal bytes.
-4. Decision tree to clauses, with limit counters and bind parameters threaded as arguments.
+- **Literals are byte patterns.** An atom literal becomes clauses such as `<<119, 2, "ok", rest::binary>>`, one per atom tag its name can be written with. A `one_of` becomes a `case` over its alternatives' FIRST sets as byte patterns: atom spellings, tag bytes, and tuple headers followed by a tag's spellings.
+- **Leaves have inline fast paths.** Integers, floats and binaries match their common encodings inline; anything else, and every failure, falls back to the same shared reader the interpreter calls, so both backends report the same error at the same offset.
+- **Loops keep the match context.** List loops match leaf elements in their head, and every loop clause starts with a binary match, so the BEAM reuses one match context across iterations instead of creating a sub-binary per element.
+- **Structs decode into their template.** A struct laid out as a map starts from its defaults and records the keys it has seen in a bitmask, for the duplicate and missing-key checks. Its encoder writes keys in an order fixed at compile time.
+- **SWAR scans.** UTF-8 validation skips ASCII 56 bytes at a time before handing the rest to `String.valid?/1`, and a `STRING_EXT` whose element codec is an integer range is checked seven bytes per word. Words are 56 bits so they stay small integers.
+- **Binding-time analysis of `bind`** compiles sequences from their continuations' source, as described under Dependent codecs.
 
 ### Static checks
 
 - **Decoding determinism:** every `one_of` must have pairwise disjoint FIRST sets over (ETF tag, literal bytes). Overlap is a compile error naming the overlapping pair.
 - **Encoding determinism:** every `one_of` must also have pairwise disjoint value shapes, so the encoder dispatches on the value without trial and error. Each alternative is summarized coarsely (atom literal, tuple with a given tag and arity, binary, integer range, map with given required keys) and overlap is a compile error. For example, `one_of([Heddle.enum([:a], unknown: :keep), Heddle.tagged(:unknown, Heddle.binary())])` is rejected because both produce `{:unknown, binary}`.
-- **Boundedness:** `Heddle.lint/1` reports every list, binary, map or bignum position with no bound from the codec, including bounds inherited through parameter binds. Call-site limits can discharge these at runtime.
+- **Boundedness:** `Heddle.lint/1` reports every list, binary, map or integer position with no bound from the codec (L001). Call-site limits discharge these at runtime.
 - **Opacity:** a `bind` classified as opaque is flagged and runs interpreted.
 - **Struct keys:** naming `:__struct__` in `Heddle.map/1`, or using an `enum` containing it as a `map_of` key codec, is a compile error (see Struct keys).
 
@@ -407,17 +418,17 @@ Compiled codecs become specialized function clauses using bit syntax. Atom liter
 Heddle reports compile-time problems with pentiment, the workspace's diagnostics library. Every IR node a Heddle macro builds carries the file and span of the expression that produced it, taken from AST metadata with `Pentiment.Elixir.span_from_ast/1`. A failed static check raises `CompileError` with a rendered `Pentiment.Report` as its description.
 
 - **Every location involved is labelled.** Overlapping `one_of` alternatives get a primary label on the later alternative and a secondary label on the earlier one, even when the earlier one comes from a `defcodec` in another file.
-- **Stable codes and a fix.** Each check has a stable error code and a help line naming the fix, such as `defcodec` for a local helper call or `Heddle.struct/2` for a `:__struct__` key.
+- **Stable codes and a fix.** Each check has a stable error code and a help line naming the fix, such as `defcodec` for a local helper call or `Heddle.struct/2` for a `:__struct__` key. The codes are H001 (overlapping FIRST sets), H002 (overlapping value shapes), H003 (`:__struct__` key), H004 (invalid constructor arguments), H005 (a call that cannot run at compile time), H006 (a module with no codec), H007 (left recursion), H008 (a value that cannot be embedded in code), H009 (a sequence where a codec is expected, or the reverse), H010 (a compile-time function called outside its compiler), W001 (opaque bind) and L001 (unbounded position).
 - **Warnings use the same format.** Opaque binds warn at compile time. `Heddle.lint/1` returns `Pentiment.Report` values, so tools render lint findings the same way.
 - **Coarser locations where no AST exists.** Elixir evaluates `@derive` options before Heddle sees them, so their findings point at the `@derive` line. Codecs built at runtime carry no spans, so `Heddle.CodecError` renders its report without source excerpts.
 
-### Hooks for deferred features
+### Where deferred features attach
 
-The IR is shaped so deferred features arrive as additive changes:
+Each deferred feature has one place to go, so none requires redesigning the IR:
 
-- Each primitive records its accepted ETF tags as data, so a canonical mode can later narrow them.
-- Map nodes carry an unknown-key policy slot, fixed to reject in v1.
-- The pipeline has a pre-parse stage, empty in v1, where decompression would go.
+- A canonical mode narrows the tag sets in the shared readers and the byte patterns the compiler emits for literals and FIRST sets.
+- Unknown-key skipping belongs in the keyed-map readers, which today reject any key the codec does not name.
+- Decompression is a step in the shared top-level decode, before the term is read, where the version byte and compressed tag are already examined.
 
 ## Correctness: laws and testing
 
@@ -479,6 +490,7 @@ Removed rather than deferred: creating atoms from input, in any form. Atoms are 
 - [x] **Compilation model.** Decided: codecs are compiled where a Heddle macro (`defschema`, `defunion`, `@derive`, `defcodec`) evaluates them at expansion time. Their expressions may call Heddle, module attributes, earlier `defcodec`s and other modules, but not the module's own functions. Compiled codecs reference each other by call, and everything built at runtime is interpreted. Rejected: an `@after_compile` companion module (Mix doesn't track its inputs, so decoders could go stale) and splicing runtime sub-codecs into compiled ones (checks move to runtime; this can return later as a generalization of parameter binds).
 - [x] **Struct keys.** Decided: a decoded map has a `:__struct__` key only when its codec is a struct layout. `map_of` rejects the key on decode and encode, and naming it elsewhere is a compile error.
 - [x] **Diagnostics.** Decided: compile-time errors and lint findings are `Pentiment.Report`s with source spans from the codec's AST.
+- [x] **Map key order in encoder output.** Decided: keys are sorted by their encoded bytes. Term order of decoded values is not the order of their bytes (an `{:unknown, name}` key encodes as an atom), and byte order needs no comparison beyond the bytes Heddle already writes.
 - [x] **`@derive` for structs you don't own.** Decided: `@derive` only for structs you own; `Heddle.struct/2` codec values for everyone else's, named explicitly where used. Nested structs may use their owner's derived implementation implicitly, and an explicit codec always wins (see Derivation).
 - [x] **Encoder stability.** Decided: no cross-OTP matrix, since Heddle writes ETF itself and its output doesn't vary by OTP. Instead, golden snapshots per Heddle version and a check that OTP 29 decodes Heddle's output (see Correctness).
 

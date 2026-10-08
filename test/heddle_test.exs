@@ -432,6 +432,26 @@ defmodule HeddleTest do
     end
   end
 
+  describe "lint" do
+    test "reports positions with no bound from the codec" do
+      reports =
+        Heddle.lint(
+          Heddle.map(
+            required: [tags: Heddle.list(Heddle.binary())],
+            optional: [n: Heddle.integer(min: 0)]
+          )
+        )
+
+      assert Enum.map(reports, & &1.code) == ["L001", "L001", "L001"]
+      assert Enum.any?(reports, &(&1.message =~ "list has no max"))
+      assert Enum.any?(reports, &(&1.message =~ "integer has no max"))
+    end
+
+    test "is quiet for a fully bounded codec" do
+      assert [] = Heddle.lint(Heddle.list(Heddle.binary(max_size: 8), max: 4))
+    end
+  end
+
   describe "errors" do
     test "found quotes at most 64 bytes" do
       %DecodeError{found: {:binary, {:truncated, prefix, 1000}}} =

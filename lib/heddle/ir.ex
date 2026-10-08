@@ -34,7 +34,7 @@ defmodule Heddle.IR do
 
   Functions in the IR are plain functions at runtime. While a Heddle macro
   evaluates a codec expression at compile time they are
-  `Heddle.IR.FunRef` placeholders carrying the function's source.
+  placeholders (`FunRef`) carrying the function's source.
 
   ## Summaries
 
