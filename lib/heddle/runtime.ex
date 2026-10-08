@@ -521,6 +521,104 @@ defmodule Heddle.Runtime do
 
   def list_tail(rest, _acc, _nodes), do: fail(:improper_list, [:nil_ext], rest)
 
+  ## Struct dispatch
+  #
+  # A choice between structs laid out as maps cannot decide on the next
+  # bytes: the :__struct__ key can be anywhere in the map. This scans the
+  # map's keys, skipping keys and values without building them, until it
+  # finds :__struct__, and returns the alternative `names` pairs with the
+  # module it names (`names` is [{module name in UTF-8, index}]). The chosen alternative then decodes the
+  # map from its start and charges the node budget as usual; the scan
+  # charges nothing, is linear in the bytes it reads, and nests no deeper
+  # than the decode would. Every way the scan can fail is reported at the
+  # map's offset.
+
+  @doc false
+  @spec struct_dispatch(binary(), pos_integer(), lim(), [{String.t(), non_neg_integer()}], [
+          term()
+        ]) ::
+          {:ok, non_neg_integer()} | {:error, failure()}
+  def struct_dispatch(
+        <<116, n::32, body::binary>> = rest,
+        depth,
+        {max_depth, _, _, _},
+        names,
+        expected
+      ) do
+    case scan_struct(body, n, depth + 1, max_depth) do
+      {:ok, name} ->
+        case List.keyfind(names, name, 0) do
+          nil -> fail(:unexpected, expected, rest)
+          {_, index} -> {:ok, index}
+        end
+
+      :max_depth ->
+        fail(:max_depth, [{:max_depth, max_depth}], rest)
+
+      :not_found ->
+        fail(:unexpected, expected, rest)
+    end
+  end
+
+  def struct_dispatch(rest, _depth, _lim, _names, expected),
+    do: fail(:unexpected_eof, expected, rest)
+
+  defp scan_struct(_bin, 0, _depth, _max), do: :not_found
+  defp scan_struct(_bin, _n, depth, max) when depth > max, do: :max_depth
+
+  defp scan_struct(bin, n, depth, max) do
+    case ETF.read_atom_name(bin) do
+      {:ok, "__struct__", after_key} ->
+        case ETF.read_atom_name(after_key) do
+          {:ok, name, _} -> {:ok, name}
+          {:error, _} -> :not_found
+        end
+
+      _ ->
+        with {:ok, after_key} <- skip(bin, depth, max),
+             {:ok, after_value} <- skip(after_key, depth, max) do
+          scan_struct(after_value, n - 1, depth, max)
+        end
+    end
+  end
+
+  # Skips one term at `depth` without building it; :not_found for a term
+  # Heddle never accepts or the end of input.
+  defp skip(_bin, depth, max) when depth > max, do: :max_depth
+  defp skip(<<tag, len, rest::binary>>, _d, _m) when tag in [115, 119], do: drop(rest, len)
+  defp skip(<<tag, len::16, rest::binary>>, _d, _m) when tag in [100, 118], do: drop(rest, len)
+  defp skip(<<97, _, rest::binary>>, _d, _m), do: {:ok, rest}
+  defp skip(<<98, _::32, rest::binary>>, _d, _m), do: {:ok, rest}
+  defp skip(<<110, n, _sign, rest::binary>>, _d, _m), do: drop(rest, n)
+  defp skip(<<111, n::32, _sign, rest::binary>>, _d, _m), do: drop(rest, n)
+  defp skip(<<70, _::64, rest::binary>>, _d, _m), do: {:ok, rest}
+  defp skip(<<109, len::32, rest::binary>>, _d, _m), do: drop(rest, len)
+  defp skip(<<77, len::32, _bits, rest::binary>>, _d, _m), do: drop(rest, len)
+  defp skip(<<104, arity, rest::binary>>, depth, max), do: skip_n(rest, arity, depth + 1, max)
+  defp skip(<<105, arity::32, rest::binary>>, depth, max), do: skip_n(rest, arity, depth + 1, max)
+  defp skip(<<106, rest::binary>>, _d, _m), do: {:ok, rest}
+  defp skip(<<107, len::16, rest::binary>>, _d, _m), do: drop(rest, len)
+
+  defp skip(<<108, n::32, rest::binary>>, depth, max) do
+    with {:ok, rest} <- skip_n(rest, n, depth + 1, max), do: skip(rest, depth + 1, max)
+  end
+
+  defp skip(<<116, n::32, rest::binary>>, depth, max) when n <= 0x7FFFFFFF,
+    do: skip_n(rest, 2 * n, depth + 1, max)
+
+  defp skip(_bin, _d, _m), do: :not_found
+
+  defp skip_n(rest, 0, _depth, _max), do: {:ok, rest}
+
+  defp skip_n(rest, n, depth, max) do
+    with {:ok, rest} <- skip(rest, depth, max), do: skip_n(rest, n - 1, depth, max)
+  end
+
+  defp drop(rest, len) when byte_size(rest) >= len,
+    do: {:ok, binary_part(rest, len, byte_size(rest) - len)}
+
+  defp drop(_rest, _len), do: :not_found
+
   # The failure for a map key that is not one of the codec's atom keys.
   @doc false
   @spec key_failure(binary(), [term()]) :: {:error, failure()}

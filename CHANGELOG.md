@@ -22,3 +22,6 @@
 - Faster compiled codecs: decoding within 1.1-1.5x of `binary_to_term/2` and
   encoding at or below `term_to_binary/1` for struct, union and list
   payloads (`bench/ratios.exs`).
+- Unions of structs laid out as maps: `one_of/1` dispatches on the
+  `:__struct__` key wherever it sits in the map, reading what
+  `term_to_binary/1` writes for structs.

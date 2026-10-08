@@ -211,3 +211,13 @@ defmodule Heddle.Test.Drawing do
     variant(:group, shapes: Heddle.list(Heddle.Test.Drawing, max: 16))
   end
 end
+
+defmodule Heddle.Test.Accounts do
+  @moduledoc false
+  # A union of structs laid out as maps, dispatched on :__struct__.
+  use Heddle.Schema
+
+  defcodec account do
+    Heddle.one_of([Heddle.atom(:anonymous), Heddle.Test.Session, Heddle.Test.Team])
+  end
+end

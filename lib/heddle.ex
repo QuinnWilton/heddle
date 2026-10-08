@@ -321,6 +321,11 @@ defmodule Heddle do
   literal), so decoding never backtracks, and by their values, so encoding
   never tries alternatives in turn. Overlap in either raises
   `Heddle.CodecError` when the codec is built.
+
+  Structs laid out as maps are the exception: they share a first byte, so
+  a map is told apart by its `:__struct__` key, found by scanning the map's
+  keys without building its values. Such structs mix with tagged tuples and
+  atoms, but not with plain `map/1` or `map_of/3` alternatives.
   """
   @spec one_of([t()]) :: t()
   def one_of([_ | _] = alts) do

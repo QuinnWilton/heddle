@@ -152,7 +152,7 @@ defmodule Heddle.Check do
     <<131, bytes::binary>> = :erlang.term_to_binary(term)
     class = ETF.classify(bytes)
 
-    case IR.choose(firsts, &IR.first_matches?(&1, class)) do
+    case choose_alternative(firsts, class, bytes) do
       nil -> term
       index -> with_defaults(Enum.at(alts, index), term)
     end
@@ -177,6 +177,20 @@ defmodule Heddle.Check do
   end
 
   defp with_defaults(%Heddle{node: _}, term), do: term
+
+  # The alternative decoding would choose, including struct dispatch.
+  defp choose_alternative(firsts, class, bytes) do
+    lim = {1_000, 10_000_000, true, :interpret}
+
+    with nil <- IR.choose(firsts, &IR.first_matches?(&1, class)),
+         [_ | _] = names <- IR.struct_names(firsts),
+         {:ok, index} <- Heddle.Runtime.struct_dispatch(bytes, 1, lim, names, []) do
+      index
+    else
+      index when is_integer(index) -> index
+      _ -> nil
+    end
+  end
 
   defp seq_defaults(%Heddle{node: {:bind, codec, continuation}}, [term | rest]) do
     {:ok, value} =

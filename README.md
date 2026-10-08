@@ -106,6 +106,18 @@ nests drawings to any depth the call's `max_depth` allows, and every list is
 bounded by its `max:`. On the wire a `%MyApp.Point{}` is `{:point, x, y}`,
 since `Point` uses the tuple layout.
 
+### Unions of structs
+
+Structs laid out as maps need no tag: a choice between them reads the
+`:__struct__` key wherever it sits in the map, so it decodes what
+`term_to_binary` already writes for structs.
+
+```elixir
+defcodec account do
+  Heddle.one_of([MyApp.User, MyApp.Org])
+end
+```
+
 ### Structs you own, and structs you don't
 
 ```elixir

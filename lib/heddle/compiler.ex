@@ -1850,6 +1850,14 @@ defmodule Heddle.Compiler do
       {:->, [],
        [[quote(do: _)], quote(do: Heddle.Runtime.fail(:unexpected, unquote(expected), rest))]}
 
+    # Structs laid out as maps share a first byte; a map dispatches on its
+    # :__struct__ key instead, through the same scan the interpreter uses.
+    clauses =
+      case IR.struct_names(firsts) do
+        [] -> clauses
+        names -> clauses ++ [struct_dispatch_clause(names, alts, expected, pctx)]
+      end
+
     # Alternatives that are a literal or a tuple of leaves also match here in
     # one clause each. FIRST sets are disjoint, so such a clause only fires
     # for the alternative the dispatch below would pick, and it is that
@@ -1857,6 +1865,34 @@ defmodule Heddle.Compiler do
     fast = if pctx == nil, do: Enum.flat_map(alts, &fused_alternative/1), else: []
 
     wrapper(pctx, {:case, [], [quote(do: rest), [do: clauses ++ [fallback]]]}, fast)
+  end
+
+  defp struct_dispatch_clause(names, alts, expected, pctx) do
+    branches =
+      names
+      |> Enum.map(&elem(&1, 1))
+      |> Enum.uniq()
+      |> Enum.map(fn index ->
+        {:->, [],
+         [[quote(do: {:ok, unquote(index)})], invoke_dec(dec(Enum.at(alts, index), pctx), pctx)]}
+      end)
+
+    dispatch =
+      quote(
+        do:
+          Heddle.Runtime.struct_dispatch(
+            rest,
+            depth,
+            lim,
+            unquote(Macro.escape(names)),
+            unquote(expected)
+          )
+      )
+
+    error = {:->, [], [[quote(do: error)], quote(do: error)]}
+
+    {:->, [],
+     [[quote(do: <<116, _::binary>>)], {:case, [], [dispatch, [do: branches ++ [error]]]}]}
   end
 
   # Byte patterns equivalent to IR.first_matches?/2 over ETF.classify/1.
@@ -1867,6 +1903,7 @@ defmodule Heddle.Compiler do
   defp first_patterns(:binary), do: tag_patterns([109])
   defp first_patterns(:list), do: tag_patterns(ETF.list_tags())
   defp first_patterns(:map), do: tag_patterns([116])
+  defp first_patterns({:struct_map, _}), do: []
 
   defp first_patterns({:tuple, arity, tag}) do
     heads =

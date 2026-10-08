@@ -127,11 +127,28 @@ defmodule Heddle.Test.CodecGen do
           sub,
           &quote(do: Heddle.tuple([Heddle.atom(:del), unquote(&1), Heddle.integer()]))
         ),
-      map: StreamData.map(sub, &quote(do: Heddle.map(required: [v: unquote(&1)])))
+      map: StreamData.map(sub, &quote(do: Heddle.map(required: [v: unquote(&1)]))),
+      point_map:
+        StreamData.map(
+          sub,
+          &quote(
+            do:
+              Heddle.struct(Heddle.Test.Point,
+                fields: [x: unquote(&1), label: Heddle.binary(max_size: 4)]
+              )
+          )
+        ),
+      box_map:
+        StreamData.map(
+          sub,
+          &quote(do: Heddle.struct(Heddle.Test.Box, fields: [contents: unquote(&1)]))
+        )
     ]
 
     gen all picked <-
               uniq(StreamData.member_of(Keyword.keys(kinds)), 4),
+            # A plain map cannot share a choice with struct maps.
+            picked = if(:map in picked, do: picked -- [:point_map, :box_map], else: picked),
             alts <- picked |> Enum.map(&Keyword.fetch!(kinds, &1)) |> StreamData.fixed_list() do
       quote(do: Heddle.one_of(unquote(alts)))
     end

@@ -111,10 +111,26 @@ defmodule Heddle.Interpreter do
     class = ETF.classify(rest)
 
     case IR.choose(firsts, &IR.first_matches?(&1, class)) do
-      nil -> Runtime.fail(:unexpected, IR.expected(codec), rest)
+      nil -> dec_struct_choice(codec, alts, firsts, class, rest, depth, nodes, lim)
       index -> dec(Enum.at(alts, index), rest, depth, nodes, lim)
     end
   end
+
+  # A map among structs laid out as maps: dispatch on its :__struct__ key.
+  defp dec_struct_choice(codec, alts, firsts, :map, rest, depth, nodes, lim) do
+    case IR.struct_names(firsts) do
+      [] ->
+        Runtime.fail(:unexpected, IR.expected(codec), rest)
+
+      names ->
+        with {:ok, index} <- Runtime.struct_dispatch(rest, depth, lim, names, IR.expected(codec)) do
+          dec(Enum.at(alts, index), rest, depth, nodes, lim)
+        end
+    end
+  end
+
+  defp dec_struct_choice(codec, _alts, _firsts, _class, rest, _depth, _nodes, _lim),
+    do: Runtime.fail(:unexpected, IR.expected(codec), rest)
 
   defp dec_iso(inner, decode, rest, depth, nodes, lim) do
     with {:ok, value, after_term, nodes} <- dec(inner, rest, depth, nodes, lim) do

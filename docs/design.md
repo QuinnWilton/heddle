@@ -72,9 +72,9 @@ They recommend staying at or below deterministic context-free, where grammar equ
 1. **Codecs are values chosen by the caller.** Dispatch never happens on the input: no protocol keyed on a decoded `__struct__`.
 2. **Decoding has no global side effects.** No atom is interned, no process is addressed, no code is loaded. A rejected input leaves the VM exactly as it was.
 3. **The language is the subset the schema names.** Funs, export refs, identifiers, `LOCAL_EXT`, compressed terms and distribution headers have no v1 codec, so they cannot be accepted.
-4. **Choice is deterministic.** `one_of` alternatives must be distinguishable by tag byte or literal at compile time, keeping the grammar LL(1) over ETF tags. Their value shapes must be disjoint too, so encoding is deterministic as well.
+4. **Choice is deterministic.** `one_of` alternatives must be distinguishable by tag byte or literal at compile time, keeping the grammar LL(1) over ETF tags. The one exception is structs laid out as maps, told apart by their `:__struct__` key wherever it sits in the map (see Struct unions). Their value shapes must be disjoint too, so encoding is deterministic as well.
 5. **Limits form a meet-semilattice.** The effective limit is the minimum of the codec's bound and the call site's. A call site can tighten, never silently loosen.
-6. **Decoding is linear-time.** With deterministic choice and no backtracking, work is proportional to input size. Interpreted `bind` paths are charged against the node budget.
+6. **Decoding is linear-time.** With deterministic choice and no backtracking, work is proportional to input size. Interpreted `bind` paths are charged against the node budget. A struct union reads the part of a map before its `:__struct__` key twice, once to find the key and once to decode it, so nested struct unions multiply work by at most their nesting, which `max_depth` bounds.
 
 ## Core abstraction
 
@@ -341,7 +341,26 @@ end
 
 Variant fields are not alternatives of a choice, so naming another module there needs nothing from it at compile time, and a union may name itself: `:group` nests drawings up to the call's `max_depth`.
 
-v1 supports one union encoding: tagged tuples, with nullary variants as bare atoms. It is idiomatic Erlang and dispatches on the leading atom, so FIRST sets are trivially disjoint. Map-based and untagged encodings are deferred.
+`defunion` writes tagged tuples, with nullary variants as bare atoms. It is idiomatic Erlang and dispatches on the leading atom, so FIRST sets are trivially disjoint.
+
+### Struct unions
+
+Structs laid out as maps can share a `one_of` without tags: the decoder tells them apart by their `:__struct__` key. This reads what `term_to_binary` already writes for structs, with no change to the wire format.
+
+```elixir
+defcodec account do
+  Heddle.one_of([MyApp.User, MyApp.Org])
+end
+```
+
+The key can be anywhere in the map (`term_to_binary` writes small maps in the VM's internal key order and large ones in hash order; Heddle's encoder sorts keys by their bytes), so the choice cannot be made on the next byte. Instead the decoder scans the map: it reads the header, then skips keys and values without building them until it finds `:__struct__`, and dispatches on the module that key names. The chosen struct's decoder then reads the map from its start.
+
+- **Bounded.** The scan reads each byte at most once, nests no deeper than `max_depth`, and builds nothing; the chosen decoder charges the node budget as usual.
+- **Exact errors.** A map with no `:__struct__` key, one that is not an atom, one naming no alternative, or one behind a term the scan cannot skip (a fun, a pid, the end of input) fails with `:unexpected` at the map's offset, expecting the union's structs. Nesting past `max_depth` before the key fails with `:max_depth` there.
+- **Shared.** The interpreter and compiled codecs call the same scan, so they choose the same alternative.
+- **Disjoint.** Two alternatives naming the same struct overlap, and so does a struct map beside a plain `map/1` or `map_of/3`, which offers no key to tell it apart (H001). Tagged-tuple variants and atoms mix with struct maps freely.
+
+Untagged unions of plain maps stay a compile error: without a discriminating key, the decoder would have to try alternatives in turn.
 
 ## Dependent codecs with `bind`
 
@@ -427,7 +446,7 @@ Each IR node becomes a private function. Decoders follow one calling convention,
 
 ### Static checks
 
-- **Decoding determinism:** every `one_of` must have pairwise disjoint FIRST sets over (ETF tag, literal bytes). Overlap is a compile error naming the overlapping pair.
+- **Decoding determinism:** every `one_of` must have pairwise disjoint FIRST sets over (ETF tag, literal bytes), where a struct laid out as a map contributes its module (see Struct unions). Overlap is a compile error naming the overlapping pair.
 - **Encoding determinism:** every `one_of` must also have pairwise disjoint value shapes, so the encoder dispatches on the value without trial and error. Each alternative is summarized coarsely (atom literal, tuple with a given tag and arity, binary, integer range, map with given required keys) and overlap is a compile error. For example, `one_of([Heddle.enum([:a], unknown: :keep), Heddle.tagged(:unknown, Heddle.binary())])` is rejected because both produce `{:unknown, binary}`.
 - **Boundedness:** `Heddle.lint/1` reports every list, binary, map or integer position with no bound from the codec (L001). Call-site limits discharge these at runtime.
 - **Opacity:** a `bind` classified as opaque is flagged and runs interpreted.
@@ -493,7 +512,6 @@ Each of these was cut from v1 to keep every claim in this document specified and
 | --- | --- | --- |
 | Canonical mode | Needs a complete, versioned grammar (integer widths, bignums, bitstrings, map order); OTP's deterministic output is not a cross-version standard | `canonical: {:heddle, 1}` narrows each primitive's accepted tag set and adds ordering checks |
 | Compressed terms | Bomb handling and separate input and inflated-byte budgets | Pre-parse stage: declared-size check, streaming inflate, inflated-bytes budget |
-| Unions over maps | The discriminator key can appear anywhere in a map | Bounded pre-scan of one map's keys, then parse; untagged map unions stay a compile error |
 | Unknown-key skipping | Needs a second, generic parser with its own budgets | `unknown_keys: :skip` via a bounded walker sharing the main budgets |
 | Prefix and streaming decode | Resumable cursors complicate budget accounting | `decode_prefix/3` first, streaming later |
 | Pid, port and ref codecs | These are capabilities, not data | Opt-in module, documented as conferring no authority over the process |

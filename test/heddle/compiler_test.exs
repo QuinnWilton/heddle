@@ -4,7 +4,7 @@ defmodule Heddle.CompilerTest do
 
   import ExUnit.CaptureIO
 
-  alias Heddle.Test.{CodecGen, Command, Env, Session, Team, UriCodecs, User}
+  alias Heddle.Test.{Accounts, CodecGen, Command, Env, Session, Team, UriCodecs, User}
 
   @large [max_bytes: 64 * 1_048_576, max_depth: 1_000, max_nodes: 10_000_000]
 
@@ -130,9 +130,94 @@ defmodule Heddle.CompilerTest do
       assert :ok = Heddle.Check.backends(module, [ok], max_nodes: 50)
     end
 
+    test "unions of structs laid out as maps dispatch on :__struct__" do
+      codec = Accounts.account()
+      session = %Session{user_id: 1, roles: [:admin], expires_at: 5}
+      team = %Team{name: "t", lead: %User{id: 1, name: "a"}, members: []}
+      # The VM's own encoding of what Heddle writes: struct fields a codec
+      # does not serialize are neither written nor accepted.
+      vm =
+        Enum.map(
+          [session, team, :anonymous],
+          &:erlang.term_to_binary(:erlang.binary_to_term(bytes(codec, &1)))
+        )
+
+      agree!(codec, [session, team, :anonymous], vm)
+
+      for {bin, value} <- Enum.zip(vm, [session, team, :anonymous]) do
+        assert {:ok, ^value} = Heddle.decode(codec, bin)
+      end
+
+      assert :ok = Heddle.Check.differential(codec, vm)
+    end
+
+    test "struct dispatch finds :__struct__ anywhere in the map" do
+      codec = Accounts.account()
+      key = &<<119, byte_size(Atom.to_string(&1)), Atom.to_string(&1)::binary>>
+
+      body = fn term ->
+        <<131, rest::binary>> = :erlang.term_to_binary(term)
+        rest
+      end
+
+      last =
+        <<131, 116, 4::32>> <>
+          key.(:user_id) <>
+          body.(1) <>
+          key.(:roles) <>
+          body.([:admin, :editor]) <>
+          key.(:expires_at) <> body.(5) <> key.(:__struct__) <> body.(Session)
+
+      assert {:ok, %Session{user_id: 1, roles: [:admin, :editor], expires_at: 5}} =
+               Heddle.decode(codec, last)
+
+      assert :ok = Heddle.Check.backends(codec, [last])
+    end
+
+    test "struct dispatch failures are reported at the map" do
+      codec = Accounts.account()
+      expected = [{:atom, :anonymous}, {:struct, Session}, {:struct, Team}]
+
+      cases = [
+        :erlang.term_to_binary(%{user_id: 1}),
+        :erlang.term_to_binary(%{__struct__: URI, user_id: 1}),
+        :erlang.term_to_binary(%{__struct__: "Session"}),
+        :erlang.term_to_binary(%{a: [[[[1]]]], __struct__: Session}) |> binary_part(0, 12)
+      ]
+
+      for bin <- cases do
+        assert {:error, %Heddle.DecodeError{offset: 1, path: [], expected: ^expected} = e} =
+                 Heddle.decode(codec, bin)
+
+        assert e.reason in [:unexpected, :unexpected_eof]
+      end
+
+      deep = :erlang.term_to_binary(%{a: [[[[1]]]], __struct__: Session})
+
+      assert {:error, %Heddle.DecodeError{reason: :max_depth, offset: 1}} =
+               Heddle.decode(codec, deep, max_depth: 3)
+
+      assert :ok = Heddle.Check.backends(codec, [deep | cases], max_depth: 3)
+      assert :ok = Heddle.Check.backends(codec, cases)
+    end
+
+    test "struct maps cannot share a choice with plain maps or themselves" do
+      point = Heddle.struct(Heddle.Test.Point, fields: [x: Heddle.integer()])
+      box = Heddle.struct(Heddle.Test.Box, fields: [size: Heddle.integer()])
+      assert %Heddle{} = Heddle.one_of([point, box])
+
+      assert_raise Heddle.CodecError, ~r/H001/, fn ->
+        Heddle.one_of([point, Heddle.map(required: [x: Heddle.integer()])])
+      end
+
+      assert_raise Heddle.CodecError, ~r/H001/, fn ->
+        Heddle.one_of([point, Heddle.refine(point, & &1, :any)])
+      end
+    end
+
     test "compiled codecs expose their IR, summary and name" do
       assert %Heddle{node: {:struct, Session, :map, _}} = Session.__heddle_ir__(:codec)
-      assert %{first: [:map]} = Session.__heddle_summary__(:codec)
+      assert %{first: [struct_map: Session]} = Session.__heddle_summary__(:codec)
       assert Env.__heddle_codecs__() == [:envelope, :sized, :tree, :lazy_tree, :refined]
     end
   end

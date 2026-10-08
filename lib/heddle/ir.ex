@@ -100,6 +100,7 @@ defmodule Heddle.IR do
           | :list
           | :map
           | {:tuple, non_neg_integer() | :any, atom() | :any}
+          | {:struct_map, module()}
 
   @type shape_item ::
           {:atom, atom()}
@@ -296,7 +297,7 @@ defmodule Heddle.IR do
 
   defp do_first(%Heddle{node: {:map_of, _, _, _}}), do: [:map]
 
-  defp do_first(%Heddle{node: {:struct, _, :map, _}}), do: [:map]
+  defp do_first(%Heddle{node: {:struct, module, :map, _}}), do: [{:struct_map, module}]
 
   defp do_first(%Heddle{node: {:struct, _, {:tuple, tag}, fields}}),
     do: [struct_tuple_first(tag, fields)]
@@ -474,6 +475,17 @@ defmodule Heddle.IR do
 
   ## Overlap and matching
 
+  @doc """
+  The structs laid out as maps among a choice's alternatives, as
+  `{module name, alternative index}`, for struct dispatch.
+  """
+  @spec struct_names([[first_item()]]) :: [{String.t(), non_neg_integer()}]
+  def struct_names(firsts) do
+    for {items, index} <- Enum.with_index(firsts),
+        {:struct_map, module} <- items,
+        do: {Atom.to_string(module), index}
+  end
+
   @doc false
   @spec first_overlap?(first_item(), first_item()) :: boolean()
   def first_overlap?({:atom, a}, {:atom, b}), do: a == b
@@ -483,6 +495,12 @@ defmodule Heddle.IR do
 
   def first_overlap?({:tuple, n1, t1}, {:tuple, n2, t2}),
     do: wild_eq?(n1, n2) and wild_eq?(t1, t2)
+
+  # Structs laid out as maps are told apart by their :__struct__ key; a plain
+  # map offers nothing to tell it from them.
+  def first_overlap?({:struct_map, a}, {:struct_map, b}), do: a == b
+  def first_overlap?({:struct_map, _}, :map), do: true
+  def first_overlap?(:map, {:struct_map, _}), do: true
 
   def first_overlap?(a, b), do: a == b
 
@@ -522,6 +540,8 @@ defmodule Heddle.IR do
       (t == :any or (is_binary(name) and Atom.to_string(t) == name))
   end
 
+  # Struct maps match through struct dispatch, never by their first bytes.
+  def first_matches?({:struct_map, _}, _class), do: false
   def first_matches?(class, class) when is_atom(class), do: true
   def first_matches?(_, _), do: false
 
@@ -610,6 +630,7 @@ defmodule Heddle.IR do
   defp inspect_item({:integer, nil, nil}), do: "any integer"
   defp inspect_item({:integer, lo, hi}), do: "integers in #{bound(lo)}..#{bound(hi)}"
   defp inspect_item({:struct, m}), do: "%#{inspect(m)}{}"
+  defp inspect_item({:struct_map, m}), do: "a map whose :__struct__ is #{inspect(m)}"
   defp inspect_item({:tuple, n, :any}), do: "tuples of arity #{arity(n)}"
   defp inspect_item({:tuple, n, t}), do: "tuples of arity #{arity(n)} tagged #{inspect(t)}"
   defp inspect_item(:integer), do: "an integer"
