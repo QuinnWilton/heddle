@@ -80,17 +80,26 @@ defmodule Heddle.Interpreter do
 
   @doc false
   @spec dec(Heddle.t(), binary(), pos_integer(), integer(), Runtime.lim()) :: Runtime.dec_result()
-  def dec(%Heddle{node: node} = codec, rest, depth, nodes, lim) do
-    case node do
-      {:one_of, alts, firsts, _} -> dec_one_of(codec, alts, firsts, rest, depth, nodes, lim)
-      {:iso, inner, decode, _} -> dec_iso(inner, decode, rest, depth, nodes, lim)
-      {:refine, inner, pred, reason} -> dec_refine(inner, pred, reason, rest, depth, nodes, lim)
-      {:from, inner, _} -> dec(inner, rest, depth, nodes, lim)
-      {:lazy, _} -> with_cache(fn -> dec(forced(codec), rest, depth, nodes, lim) end)
-      {:ref, module, name} -> dec_ref(module, name, rest, depth, nodes, lim)
-      _ -> consume(codec, rest, depth, nodes, lim)
-    end
-  end
+  def dec(%Heddle{node: {:one_of, alts, firsts, _}} = codec, rest, depth, nodes, lim),
+    do: dec_one_of(codec, alts, firsts, rest, depth, nodes, lim)
+
+  def dec(%Heddle{node: {:iso, inner, decode, _}}, rest, depth, nodes, lim),
+    do: dec_iso(inner, decode, rest, depth, nodes, lim)
+
+  def dec(%Heddle{node: {:refine, inner, pred, reason}}, rest, depth, nodes, lim),
+    do: dec_refine(inner, pred, reason, rest, depth, nodes, lim)
+
+  def dec(%Heddle{node: {:from, inner, _}}, rest, depth, nodes, lim),
+    do: dec(inner, rest, depth, nodes, lim)
+
+  def dec(%Heddle{node: {:lazy, _}} = codec, rest, depth, nodes, lim),
+    do: with_cache(fn -> dec(forced(codec), rest, depth, nodes, lim) end)
+
+  def dec(%Heddle{node: {:ref, module, name}}, rest, depth, nodes, lim),
+    do: dec_ref(module, name, rest, depth, nodes, lim)
+
+  def dec(%Heddle{node: _} = codec, rest, depth, nodes, lim),
+    do: consume(codec, rest, depth, nodes, lim)
 
   defp dec_ref(module, name, rest, depth, nodes, {_, _, _, :compiled} = lim),
     do: module.__heddle_decode__(name, rest, depth, nodes, lim)
@@ -131,107 +140,116 @@ defmodule Heddle.Interpreter do
     end
   end
 
-  defp read(%Heddle{node: node} = codec, rest, depth, nodes, lim) do
-    case node do
-      {:literal, atom} ->
-        name = Atom.to_string(atom)
+  defp read(%Heddle{node: {:literal, atom}} = codec, rest, _depth, nodes, _lim) do
+    name = Atom.to_string(atom)
 
-        case ETF.read_atom_name(rest) do
-          {:ok, ^name, after_term} -> {:ok, atom, after_term, nodes}
-          _ -> Runtime.atom_failure(rest, IR.expected(codec))
+    case ETF.read_atom_name(rest) do
+      {:ok, ^name, after_term} -> {:ok, atom, after_term, nodes}
+      _ -> Runtime.atom_failure(rest, IR.expected(codec))
+    end
+  end
+
+  defp read(%Heddle{node: {:enum, atoms, unknown}} = codec, rest, _depth, nodes, _lim) do
+    names = Map.new(atoms, &{Atom.to_string(&1), &1})
+    Runtime.read_enum(rest, nodes, names, unknown, IR.expected(codec))
+  end
+
+  defp read(%Heddle{node: :existing_atom} = codec, rest, _depth, nodes, _lim),
+    do: Runtime.read_existing_atom(rest, nodes, IR.expected(codec))
+
+  defp read(%Heddle{node: {:integer, min, max}} = codec, rest, _depth, nodes, _lim),
+    do: Runtime.read_integer(rest, nodes, min, max, IR.expected(codec))
+
+  defp read(%Heddle{node: :char} = codec, rest, _depth, nodes, _lim),
+    do: Runtime.read_char(rest, nodes, IR.expected(codec))
+
+  defp read(%Heddle{node: :float} = codec, rest, _depth, nodes, _lim),
+    do: Runtime.read_float(rest, nodes, IR.expected(codec))
+
+  defp read(%Heddle{node: {:binary, max, utf8}} = codec, rest, _depth, nodes, lim),
+    do: Runtime.read_binary(rest, nodes, max, utf8, IR.expected(codec), lim)
+
+  defp read(%Heddle{node: {:list, elem, max}} = codec, rest, depth, nodes, lim),
+    do: read_list(elem, max, IR.expected(codec), rest, depth, nodes, lim)
+
+  defp read(%Heddle{node: {:tuple, elems}} = codec, rest, depth, nodes, lim),
+    do: read_tuple(elems, IR.expected(codec), rest, depth, nodes, lim)
+
+  defp read(%Heddle{node: {:map, required, optional}} = codec, rest, depth, nodes, lim) do
+    named = required ++ optional
+    required_keys = Enum.map(required, &elem(&1, 0))
+
+    with {:ok, acc, after_term, nodes} <-
+           read_keyed_map(named, IR.expected(codec), rest, depth, nodes, lim),
+         :ok <- Runtime.missing(required_keys, acc, rest) do
+      {:ok, acc, after_term, nodes}
+    end
+  end
+
+  defp read(%Heddle{node: {:struct, module, :map, fields}} = codec, rest, depth, nodes, lim) do
+    named = [
+      {:__struct__, %Heddle{node: {:literal, module}}}
+      | Enum.map(fields, fn {n, c, _} -> {n, c} end)
+    ]
+
+    required = [:__struct__ | for({name, _, :none} <- fields, do: name)]
+
+    with {:ok, acc, after_term, nodes} <-
+           read_keyed_map(named, IR.expected(codec), rest, depth, nodes, lim),
+         :ok <- Runtime.missing(required, acc, rest) do
+      {:ok, Runtime.build_struct(module, defaults(fields), acc), after_term, nodes}
+    end
+  end
+
+  defp read(
+         %Heddle{node: {:struct, module, {:tuple, tag}, fields}} = codec,
+         rest,
+         depth,
+         nodes,
+         lim
+       ) do
+    codecs = Enum.map(fields, &elem(&1, 1))
+    elems = if tag, do: [%Heddle{node: {:literal, tag}} | codecs], else: codecs
+
+    with {:ok, tuple, after_term, nodes} <-
+           read_tuple(elems, IR.expected(codec), rest, depth, nodes, lim) do
+      values = tuple |> Tuple.to_list() |> Enum.drop(if(tag, do: 1, else: 0))
+      acc = fields |> Enum.map(&elem(&1, 0)) |> Enum.zip(values) |> Map.new()
+      {:ok, Runtime.build_struct(module, defaults(fields), acc), after_term, nodes}
+    end
+  end
+
+  defp read(%Heddle{node: {:map_of, key, value, max}} = codec, rest, depth, nodes, lim) do
+    expected = IR.expected(codec)
+
+    case rest do
+      <<116, n::32, body::binary>> ->
+        with :ok <-
+               Runtime.check_count(n, max, {2, byte_size(body)}, 2, nodes, expected, rest, lim) do
+          map_of_pairs({key, value}, body, n, 0, depth + 1, nodes, lim, %{})
         end
 
-      {:enum, atoms, unknown} ->
-        names = Map.new(atoms, &{Atom.to_string(&1), &1})
-        Runtime.read_enum(rest, nodes, names, unknown, IR.expected(codec))
+      <<116, _::binary>> ->
+        Runtime.fail(:unexpected_eof, expected, rest)
 
-      :existing_atom ->
-        Runtime.read_existing_atom(rest, nodes, IR.expected(codec))
+      _ ->
+        Runtime.fail(:unexpected, expected, rest)
+    end
+  end
 
-      {:integer, min, max} ->
-        Runtime.read_integer(rest, nodes, min, max, IR.expected(codec))
+  defp read(%Heddle{node: {:tuple_seq, tag, seq}} = codec, rest, depth, nodes, lim) do
+    expected = IR.expected(codec)
 
-      :char ->
-        Runtime.read_char(rest, nodes, IR.expected(codec))
+    case Runtime.tuple_header(rest) do
+      {:ok, arity, body} ->
+        state = {rest, expected, arity, depth + 1, lim}
 
-      :float ->
-        Runtime.read_float(rest, nodes, IR.expected(codec))
-
-      {:binary, max, utf8} ->
-        Runtime.read_binary(rest, nodes, max, utf8, IR.expected(codec), lim)
-
-      {:list, elem, max} ->
-        read_list(elem, max, IR.expected(codec), rest, depth, nodes, lim)
-
-      {:tuple, elems} ->
-        read_tuple(elems, IR.expected(codec), rest, depth, nodes, lim)
-
-      {:map, required, optional} ->
-        named = required ++ optional
-        required_keys = Enum.map(required, &elem(&1, 0))
-
-        with {:ok, acc, after_term, nodes} <-
-               read_keyed_map(named, IR.expected(codec), rest, depth, nodes, lim),
-             :ok <- Runtime.missing(required_keys, acc, rest) do
-          {:ok, acc, after_term, nodes}
+        with {:ok, index, body, nodes} <- seq_tag(tag, state, body, nodes) do
+          run_seq(seq, state, index, body, nodes)
         end
 
-      {:struct, module, :map, fields} ->
-        named = [
-          {:__struct__, %Heddle{node: {:literal, module}}}
-          | Enum.map(fields, fn {n, c, _} -> {n, c} end)
-        ]
-
-        required = [:__struct__ | for({name, _, :none} <- fields, do: name)]
-
-        with {:ok, acc, after_term, nodes} <-
-               read_keyed_map(named, IR.expected(codec), rest, depth, nodes, lim),
-             :ok <- Runtime.missing(required, acc, rest) do
-          {:ok, Runtime.build_struct(module, defaults(fields), acc), after_term, nodes}
-        end
-
-      {:struct, module, {:tuple, tag}, fields} ->
-        codecs = Enum.map(fields, &elem(&1, 1))
-        elems = if tag, do: [%Heddle{node: {:literal, tag}} | codecs], else: codecs
-
-        with {:ok, tuple, after_term, nodes} <-
-               read_tuple(elems, IR.expected(codec), rest, depth, nodes, lim) do
-          values = tuple |> Tuple.to_list() |> Enum.drop(if(tag, do: 1, else: 0))
-          acc = fields |> Enum.map(&elem(&1, 0)) |> Enum.zip(values) |> Map.new()
-          {:ok, Runtime.build_struct(module, defaults(fields), acc), after_term, nodes}
-        end
-
-      {:map_of, key, value, max} ->
-        expected = IR.expected(codec)
-
-        case rest do
-          <<116, n::32, body::binary>> ->
-            with :ok <-
-                   Runtime.check_count(n, max, 2, byte_size(body), 2, nodes, expected, rest, lim) do
-              map_of_pairs(key, value, body, n, 0, depth + 1, nodes, lim, %{})
-            end
-
-          <<116, _::binary>> ->
-            Runtime.fail(:unexpected_eof, expected, rest)
-
-          _ ->
-            Runtime.fail(:unexpected, expected, rest)
-        end
-
-      {:tuple_seq, tag, seq} ->
-        expected = IR.expected(codec)
-
-        case Runtime.tuple_header(rest) do
-          {:ok, arity, body} ->
-            state = {rest, expected, arity, depth + 1, lim}
-
-            with {:ok, index, body, nodes} <- seq_tag(tag, state, body, nodes) do
-              run_seq(seq, state, index, body, nodes)
-            end
-
-          {:error, reason} ->
-            Runtime.fail(reason, expected, rest)
-        end
+      {:error, reason} ->
+        Runtime.fail(reason, expected, rest)
     end
   end
 
@@ -244,13 +262,22 @@ defmodule Heddle.Interpreter do
 
       <<107, len::16, body::binary>> ->
         with :ok <-
-               Runtime.check_count(len, max, 1, byte_size(body), 1, nodes, expected, rest, lim) do
-          string_elems(elem, body, len, 0, byte_size(body), depth + 1, nodes, lim, [])
+               Runtime.check_count(len, max, {1, byte_size(body)}, 1, nodes, expected, rest, lim) do
+          string_elems(elem, body, {len, byte_size(body)}, 0, depth + 1, nodes, lim, [])
         end
 
       <<108, n::32, body::binary>> ->
         with :ok <-
-               Runtime.check_count(n, max, 1, byte_size(body) - 1, 1, nodes, expected, rest, lim) do
+               Runtime.check_count(
+                 n,
+                 max,
+                 {1, byte_size(body) - 1},
+                 1,
+                 nodes,
+                 expected,
+                 rest,
+                 lim
+               ) do
           list_elems(elem, body, n, 0, depth + 1, nodes, lim, [])
         end
 
@@ -292,15 +319,24 @@ defmodule Heddle.Interpreter do
     end
   end
 
-  defp string_elems(_elem, rest, len, len, _size, _depth, nodes, _lim, acc),
+  defp string_elems(_elem, rest, {len, _size}, len, _depth, nodes, _lim, acc),
     do: {:ok, Enum.reverse(acc), rest, nodes}
 
-  defp string_elems(elem, <<byte, rest::binary>>, len, i, size, depth, nodes, lim, acc) do
+  defp string_elems(
+         elem,
+         <<byte, rest::binary>>,
+         {_len, size} = lengths,
+         i,
+         depth,
+         nodes,
+         lim,
+         acc
+       ) do
     decode = &dec(elem, &1, &2, &3, &4)
 
     case Runtime.string_byte(byte, size - i, decode, depth, nodes, lim) do
       {:ok, v, _, nodes} ->
-        string_elems(elem, rest, len, i + 1, size, depth, nodes, lim, [v | acc])
+        string_elems(elem, rest, lengths, i + 1, depth, nodes, lim, [v | acc])
 
       error ->
         Runtime.prefix(error, i)
@@ -315,8 +351,7 @@ defmodule Heddle.Interpreter do
                Runtime.check_count(
                  n,
                  length(named),
-                 2,
-                 byte_size(body),
+                 {2, byte_size(body)},
                  2,
                  nodes,
                  expected,
@@ -371,18 +406,17 @@ defmodule Heddle.Interpreter do
     end
   end
 
-  defp map_of_pairs(_key, _value, rest, 0, _i, _depth, nodes, _lim, acc),
+  defp map_of_pairs(_codecs, rest, 0, _i, _depth, nodes, _lim, acc),
     do: {:ok, acc, rest, nodes}
 
-  defp map_of_pairs(key_codec, value_codec, rest, n, i, depth, nodes, lim, acc) do
+  defp map_of_pairs({key_codec, value_codec} = codecs, rest, n, i, depth, nodes, lim, acc) do
     with {:ok, key, after_key, nodes} <-
            dec(key_codec, rest, depth, nodes, lim) |> Runtime.prefix({:key, i}),
          :ok <- Runtime.check_map_key(key, acc, IR.expected(key_codec), rest),
          {:ok, value, after_value, nodes} <-
            dec(value_codec, after_key, depth, nodes, lim) |> Runtime.prefix(key) do
       map_of_pairs(
-        key_codec,
-        value_codec,
+        codecs,
         after_value,
         n - 1,
         i + 1,
@@ -469,89 +503,89 @@ defmodule Heddle.Interpreter do
 
   @doc false
   @spec enc(Heddle.t(), term(), Runtime.mode()) :: Runtime.enc_result()
-  def enc(%Heddle{node: node} = codec, value, mode) do
-    case node do
-      {:literal, atom} ->
-        if value === atom,
-          do: {:ok, atom, ETF.encode_atom(atom)},
-          else: {:error, {[], {:type, {:atom, atom}, value}}}
+  def enc(%Heddle{node: {:literal, atom}}, value, _mode) do
+    if value === atom,
+      do: {:ok, atom, ETF.encode_atom(atom)},
+      else: {:error, {[], {:type, {:atom, atom}, value}}}
+  end
 
-      {:enum, atoms, unknown} ->
-        Runtime.enc_enum(value, atoms, unknown)
+  def enc(%Heddle{node: {:enum, atoms, unknown}}, value, _mode),
+    do: Runtime.enc_enum(value, atoms, unknown)
 
-      :existing_atom ->
-        Runtime.enc_existing_atom(value)
+  def enc(%Heddle{node: :existing_atom}, value, _mode), do: Runtime.enc_existing_atom(value)
 
-      {:integer, min, max} ->
-        Runtime.enc_integer(value, min, max)
+  def enc(%Heddle{node: {:integer, min, max}}, value, _mode),
+    do: Runtime.enc_integer(value, min, max)
 
-      :char ->
-        Runtime.enc_char(value)
+  def enc(%Heddle{node: :char}, value, _mode), do: Runtime.enc_char(value)
 
-      :float ->
-        Runtime.enc_float(value)
+  def enc(%Heddle{node: :float}, value, _mode), do: Runtime.enc_float(value)
 
-      {:binary, max, utf8} ->
-        Runtime.enc_binary(value, max, utf8)
+  def enc(%Heddle{node: {:binary, max, utf8}}, value, _mode),
+    do: Runtime.enc_binary(value, max, utf8)
 
-      {:list, elem, max} ->
-        Runtime.enc_list(value, max, &enc(elem, &1, mode))
+  def enc(%Heddle{node: {:list, elem, max}}, value, mode),
+    do: Runtime.enc_list(value, max, &enc(elem, &1, mode))
 
-      {:tuple, elems} ->
-        enc_tuple(elems, value, mode)
+  def enc(%Heddle{node: {:tuple, elems}}, value, mode), do: enc_tuple(elems, value, mode)
 
-      {:map, required, optional} ->
-        Runtime.enc_map(value, encoders(required, mode), encoders(optional, mode))
+  def enc(%Heddle{node: {:map, required, optional}}, value, mode),
+    do: Runtime.enc_map(value, encoders(required, mode), encoders(optional, mode))
 
-      {:struct, module, layout, fields} ->
-        Runtime.enc_struct(
-          value,
-          module,
-          layout,
-          encoders(Enum.map(fields, fn {n, c, _} -> {n, c} end), mode)
-        )
+  def enc(%Heddle{node: {:struct, module, layout, fields}}, value, mode) do
+    Runtime.enc_struct(
+      value,
+      module,
+      layout,
+      encoders(Enum.map(fields, fn {n, c, _} -> {n, c} end), mode)
+    )
+  end
 
-      {:map_of, key, val, max} ->
-        Runtime.enc_map_of(value, max, &enc(key, &1, mode), &enc(val, &1, mode))
+  def enc(%Heddle{node: {:map_of, key, val, max}}, value, mode),
+    do: Runtime.enc_map_of(value, max, &enc(key, &1, mode), &enc(val, &1, mode))
 
-      {:one_of, alts, _, shapes} ->
-        case IR.choose(shapes, &IR.shape_matches?(&1, value)) do
-          nil -> {:error, {[], {:no_alternative, value}}}
-          index -> enc(Enum.at(alts, index), value, mode)
-        end
+  def enc(%Heddle{node: {:one_of, alts, _, shapes}}, value, mode) do
+    case IR.choose(shapes, &IR.shape_matches?(&1, value)) do
+      nil -> {:error, {[], {:no_alternative, value}}}
+      index -> enc(Enum.at(alts, index), value, mode)
+    end
+  end
 
-      {:iso, inner, decode, encode} ->
-        with {:ok, inner_value} <- iso_step(encode, value, value),
-             {:ok, inner_y, iodata} <- enc(inner, inner_value, mode),
-             {:ok, y} <- iso_step(decode, inner_y, value) do
-          {:ok, y, iodata}
-        end
+  def enc(%Heddle{node: {:iso, inner, decode, encode}}, value, mode) do
+    with {:ok, inner_value} <- iso_step(encode, value, value),
+         {:ok, inner_y, iodata} <- enc(inner, inner_value, mode),
+         {:ok, y} <- iso_step(decode, inner_y, value) do
+      {:ok, y, iodata}
+    end
+  end
 
-      {:refine, inner, pred, reason} ->
-        with {:ok, y, iodata} <- enc(inner, value, mode) do
-          if pred.(y), do: {:ok, y, iodata}, else: {:error, {[], {:refine, reason, value}}}
-        end
+  def enc(%Heddle{node: {:refine, inner, pred, reason}}, value, mode) do
+    with {:ok, y, iodata} <- enc(inner, value, mode) do
+      if pred.(y), do: {:ok, y, iodata}, else: {:error, {[], {:refine, reason, value}}}
+    end
+  end
 
-      {:from, inner, getter} ->
-        case Runtime.get(getter, value) do
-          {:ok, part} -> enc(inner, part, mode)
-          :error -> {:error, {[], {:getter, value}}}
-        end
+  def enc(%Heddle{node: {:from, inner, getter}}, value, mode) do
+    case Runtime.get(getter, value) do
+      {:ok, part} -> enc(inner, part, mode)
+      :error -> {:error, {[], {:getter, value}}}
+    end
+  end
 
-      {:lazy, _} ->
-        with_cache(fn -> enc(forced(codec), value, mode) end)
+  def enc(%Heddle{node: {:lazy, _}} = codec, value, mode),
+    do: with_cache(fn -> enc(forced(codec), value, mode) end)
 
-      {:ref, module, name} ->
-        if mode == :compiled,
-          do: module.__heddle_encode__(name, value),
-          else: with_cache(fn -> enc(resolved(module, name), value, mode) end)
+  def enc(%Heddle{node: {:ref, module, name}}, value, mode) do
+    if mode == :compiled,
+      do: module.__heddle_encode__(name, value),
+      else: with_cache(fn -> enc(resolved(module, name), value, mode) end)
+  end
 
-      {:tuple_seq, tag, seq} ->
-        prefix = if tag, do: [ETF.encode_atom(tag)], else: []
+  def enc(%Heddle{node: {:tuple_seq, tag, seq}}, value, mode) do
+    prefix = if tag, do: [ETF.encode_atom(tag)], else: []
 
-        with {:ok, y, elems} <- enc_seq(seq, value, mode, length(prefix), Enum.reverse(prefix)) do
-          {:ok, y, [ETF.tuple_header(length(elems)) | elems]}
-        end
+    with {:ok, y, elems} <- enc_seq(seq, value, mode, length(prefix), Enum.reverse(prefix)) do
+      {:ok, y, [ETF.tuple_header(length(elems)) | elems]}
     end
   end
 

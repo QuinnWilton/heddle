@@ -1,4 +1,5 @@
 defmodule Heddle.Test.Session do
+  @moduledoc false
   use Heddle.Schema
 
   defschema as: :map do
@@ -15,6 +16,7 @@ defmodule Heddle.Test.Session do
 end
 
 defmodule Heddle.Test.Command do
+  @moduledoc false
   use Heddle.Schema
 
   defunion do
@@ -25,6 +27,7 @@ defmodule Heddle.Test.Command do
 end
 
 defmodule Heddle.Test.Env do
+  @moduledoc false
   use Heddle.Schema
   import Heddle.Syntax
 
@@ -74,12 +77,14 @@ defmodule Heddle.Test.Env do
 end
 
 defmodule Heddle.Test.User do
+  @moduledoc false
   @derive {Heddle.Codec,
            fields: [id: Heddle.integer(min: 1), name: Heddle.binary(max_size: 100, utf8: true)]}
   defstruct [:id, :name, :cache]
 end
 
 defmodule Heddle.Test.Team do
+  @moduledoc false
   use Heddle.Schema
 
   defschema do
@@ -90,6 +95,7 @@ defmodule Heddle.Test.Team do
 end
 
 defmodule Heddle.Test.UriCodecs do
+  @moduledoc false
   use Heddle.Schema
 
   defcodec uri_codec do
@@ -109,6 +115,7 @@ end
 
 # Mutually recursive structs in different modules: each names the other.
 defmodule Heddle.Test.Folder do
+  @moduledoc false
   use Heddle.Schema
 
   defschema do
@@ -118,6 +125,7 @@ defmodule Heddle.Test.Folder do
 end
 
 defmodule Heddle.Test.File do
+  @moduledoc false
   use Heddle.Schema
 
   defschema as: :tuple, tag: :file do

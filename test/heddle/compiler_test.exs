@@ -4,7 +4,7 @@ defmodule Heddle.CompilerTest do
 
   import ExUnit.CaptureIO
 
-  alias Heddle.Test.{CodecGen, Command, Env, Session, Team, User, UriCodecs}
+  alias Heddle.Test.{CodecGen, Command, Env, Session, Team, UriCodecs, User}
 
   @large [max_bytes: 64 * 1_048_576, max_depth: 1_000, max_nodes: 10_000_000]
 

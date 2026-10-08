@@ -131,63 +131,73 @@ defmodule Heddle.Compiler.Expr do
     acc
   end
 
-  defp walk(ast, env, scope) do
-    case ast do
-      {:fn, meta, [{:->, _, [args, _]} | _]} = fun ->
-        funref(fun, length(strip_when(args)), meta, scope)
+  defp walk({:fn, meta, [{:->, _, [args, _]} | _]} = fun, _env, scope) do
+    funref(fun, length(strip_when(args)), meta, scope)
+  end
 
-      {:&, meta, [{:/, _, [_call, arity]}]} = capture when is_integer(arity) ->
-        local_codec_capture(capture, env) || funref(capture, arity, meta, scope)
+  defp walk({:&, meta, [{:/, _, [_call, arity]}]} = capture, env, scope) when is_integer(arity) do
+    local_codec_capture(capture, env) || funref(capture, arity, meta, scope)
+  end
 
-      {:&, meta, [_body]} = capture ->
-        funref(capture, capture_arity(capture), meta, scope)
+  defp walk({:&, meta, [_body]} = capture, _env, scope) do
+    funref(capture, capture_arity(capture), meta, scope)
+  end
 
-      {:__block__, meta, exprs} ->
-        {exprs, _scope} =
-          Enum.map_reduce(exprs, scope, fn expr, scope ->
-            walked = walk(expr, env, scope)
+  defp walk({:__block__, meta, exprs}, env, scope) do
+    {exprs, _scope} =
+      Enum.map_reduce(exprs, scope, fn expr, scope ->
+        walked = walk(expr, env, scope)
 
-            case expr do
-              {:=, _, [pattern, _]} -> {walked, MapSet.union(scope, var_keys(pattern))}
-              _ -> {walked, scope}
-            end
-          end)
+        case expr do
+          {:=, _, [pattern, _]} -> {walked, MapSet.union(scope, var_keys(pattern))}
+          _ -> {walked, scope}
+        end
+      end)
 
-        {:__block__, meta, exprs}
+    {:__block__, meta, exprs}
+  end
 
-      {:case, meta, [subject, [do: clauses]]} ->
-        clauses =
-          Enum.map(clauses, fn {:->, m, [[head], body]} ->
-            {:->, m, [[head], walk(body, env, MapSet.union(scope, var_keys(head)))]}
-          end)
+  defp walk({:case, meta, [subject, [do: clauses]]}, env, scope) do
+    clauses =
+      Enum.map(clauses, fn {:->, m, [[head], body]} ->
+        {:->, m, [[head], walk(body, env, MapSet.union(scope, var_keys(head)))]}
+      end)
 
-        {:case, meta, [walk(subject, env, scope), [do: clauses]]}
+    {:case, meta, [walk(subject, env, scope), [do: clauses]]}
+  end
 
-      {{:., _, [Heddle, fun]}, meta, args} when is_atom(fun) and is_list(args) ->
-        call = {{:., [], [Heddle, fun]}, meta, Enum.map(args, &walk(&1, env, scope))}
-        quote do: Heddle.IR.__at__(unquote(call), unquote(Macro.escape(span(meta, env))))
+  defp walk({{:., _, [Heddle, fun]}, meta, args}, env, scope)
+       when is_atom(fun) and is_list(args) do
+    call = {{:., [], [Heddle, fun]}, meta, Enum.map(args, &walk(&1, env, scope))}
+    quote do: Heddle.IR.__at__(unquote(call), unquote(Macro.escape(span(meta, env))))
+  end
 
-      {{:., meta, [module, fun]}, call_meta, args} when is_atom(module) and is_list(args) ->
-        unless module in [Kernel, Module, Heddle.IR, :erlang],
-          do: update(&%{&1 | deps: MapSet.put(&1.deps, module)})
+  defp walk({{:., meta, [module, fun]}, call_meta, args}, env, scope)
+       when is_atom(module) and is_list(args) do
+    unless module in [Kernel, Module, Heddle.IR, :erlang],
+      do: update(&%{&1 | deps: MapSet.put(&1.deps, module)})
 
-        {{:., meta, [module, fun]}, call_meta, Enum.map(args, &walk(&1, env, scope))}
+    {{:., meta, [module, fun]}, call_meta, Enum.map(args, &walk(&1, env, scope))}
+  end
 
-      {name, meta, args} when is_atom(name) and is_list(args) ->
-        local_call(name, meta, args, env, scope)
+  defp walk({name, meta, args}, env, scope) when is_atom(name) and is_list(args) do
+    local_call(name, meta, args, env, scope)
+  end
 
-      {left, right} ->
-        {walk(left, env, scope), walk(right, env, scope)}
+  defp walk({left, right}, env, scope) do
+    {walk(left, env, scope), walk(right, env, scope)}
+  end
 
-      list when is_list(list) ->
-        Enum.map(list, &walk(&1, env, scope))
+  defp walk(list, env, scope) when is_list(list) do
+    Enum.map(list, &walk(&1, env, scope))
+  end
 
-      {form, meta, args} when is_list(args) ->
-        {walk(form, env, scope), meta, Enum.map(args, &walk(&1, env, scope))}
+  defp walk({form, meta, args}, env, scope) when is_list(args) do
+    {walk(form, env, scope), meta, Enum.map(args, &walk(&1, env, scope))}
+  end
 
-      other ->
-        other
-    end
+  defp walk(other, _env, _scope) do
+    other
   end
 
   defp strip_when([{:when, _, args}]), do: Enum.drop(args, -1)

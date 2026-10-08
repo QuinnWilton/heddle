@@ -271,31 +271,50 @@ defmodule Heddle.IR do
   @spec first(Heddle.t()) :: [first_item()]
   def first(%Heddle{} = codec), do: guarded(fn -> do_first(codec) end)
 
-  defp do_first(%Heddle{node: node} = codec) do
-    case node do
-      {:literal, a} -> [{:atom, a}]
-      {:enum, atoms, :reject} -> Enum.map(atoms, &{:atom, &1})
-      {:enum, _, :keep} -> [:any_atom]
-      :existing_atom -> [:any_atom]
-      {:integer, _, _} -> [:integer]
-      :char -> [:integer]
-      :float -> [:float]
-      {:binary, _, _} -> [:binary]
-      {:list, _, _} -> [:list]
-      {:tuple, elems} -> [{:tuple, length(elems), first_literal(List.first(elems))}]
-      {:map, _, _} -> [:map]
-      {:map_of, _, _, _} -> [:map]
-      {:struct, _, :map, _} -> [:map]
-      {:struct, _, {:tuple, tag}, fields} -> [struct_tuple_first(tag, fields)]
-      {:one_of, _, firsts, _} -> Enum.concat(firsts)
-      {:iso, inner, _, _} -> do_first(inner)
-      {:refine, inner, _, _} -> do_first(inner)
-      {:from, inner, _} -> do_first(inner)
-      {:lazy, _} -> do_first(force(codec))
-      {:ref, module, name} -> summary_of_ref(module, name).first
-      {:tuple_seq, tag, seq} -> [{:tuple, :any, tag || seq_first_literal(seq)}]
-    end
-  end
+  defp do_first(%Heddle{node: {:literal, a}}), do: [{:atom, a}]
+
+  defp do_first(%Heddle{node: {:enum, atoms, :reject}}), do: Enum.map(atoms, &{:atom, &1})
+
+  defp do_first(%Heddle{node: {:enum, _, :keep}}), do: [:any_atom]
+
+  defp do_first(%Heddle{node: :existing_atom}), do: [:any_atom]
+
+  defp do_first(%Heddle{node: {:integer, _, _}}), do: [:integer]
+
+  defp do_first(%Heddle{node: :char}), do: [:integer]
+
+  defp do_first(%Heddle{node: :float}), do: [:float]
+
+  defp do_first(%Heddle{node: {:binary, _, _}}), do: [:binary]
+
+  defp do_first(%Heddle{node: {:list, _, _}}), do: [:list]
+
+  defp do_first(%Heddle{node: {:tuple, elems}}),
+    do: [{:tuple, length(elems), first_literal(List.first(elems))}]
+
+  defp do_first(%Heddle{node: {:map, _, _}}), do: [:map]
+
+  defp do_first(%Heddle{node: {:map_of, _, _, _}}), do: [:map]
+
+  defp do_first(%Heddle{node: {:struct, _, :map, _}}), do: [:map]
+
+  defp do_first(%Heddle{node: {:struct, _, {:tuple, tag}, fields}}),
+    do: [struct_tuple_first(tag, fields)]
+
+  defp do_first(%Heddle{node: {:one_of, _, firsts, _}}), do: Enum.concat(firsts)
+
+  defp do_first(%Heddle{node: {:iso, inner, _, _}}), do: do_first(inner)
+
+  defp do_first(%Heddle{node: {:refine, inner, _, _}}), do: do_first(inner)
+
+  defp do_first(%Heddle{node: {:from, inner, _}}), do: do_first(inner)
+
+  defp do_first(%Heddle{node: {:lazy, _}} = codec), do: do_first(force(codec))
+
+  defp do_first(%Heddle{node: {:ref, module, name}}), do: summary_of_ref(module, name).first
+
+  defp do_first(%Heddle{node: {:tuple_seq, tag, seq}}),
+    do: [{:tuple, :any, tag || seq_first_literal(seq)}]
 
   defp struct_tuple_first(nil, [{_, codec, _} | _] = fields),
     do: {:tuple, length(fields), first_literal(codec)}
@@ -324,30 +343,47 @@ defmodule Heddle.IR do
   @spec shape(Heddle.t()) :: [shape_item()]
   def shape(%Heddle{} = codec), do: guarded(fn -> do_shape(codec) end)
 
-  defp do_shape(%Heddle{node: node} = codec) do
-    case node do
-      {:literal, a} -> [{:atom, a}]
-      {:enum, atoms, :reject} -> Enum.map(atoms, &{:atom, &1})
-      {:enum, atoms, :keep} -> Enum.map(atoms, &{:atom, &1}) ++ [{:tuple, 2, :unknown}]
-      :existing_atom -> [:any_atom]
-      {:integer, min, max} -> [{:integer, min, max}]
-      :char -> [{:integer, 0, 0x10FFFF}]
-      :float -> [:float]
-      {:binary, _, _} -> [:binary]
-      {:list, _, _} -> [:list]
-      {:tuple, elems} -> [{:tuple, length(elems), shape_literal(List.first(elems))}]
-      {:map, _, _} -> [:map]
-      {:map_of, _, _, _} -> [:map]
-      {:struct, module, _, _} -> [{:struct, module}]
-      {:one_of, _, _, shapes} -> Enum.concat(shapes)
-      {:refine, inner, _, _} -> do_shape(inner)
-      {:iso, _, _, _} -> [:any]
-      {:from, _, _} -> [:any]
-      {:tuple_seq, _, _} -> [:any]
-      {:lazy, _} -> do_shape(force(codec))
-      {:ref, module, name} -> summary_of_ref(module, name).shape
-    end
-  end
+  defp do_shape(%Heddle{node: {:literal, a}}), do: [{:atom, a}]
+
+  defp do_shape(%Heddle{node: {:enum, atoms, :reject}}), do: Enum.map(atoms, &{:atom, &1})
+
+  defp do_shape(%Heddle{node: {:enum, atoms, :keep}}),
+    do: Enum.map(atoms, &{:atom, &1}) ++ [{:tuple, 2, :unknown}]
+
+  defp do_shape(%Heddle{node: :existing_atom}), do: [:any_atom]
+
+  defp do_shape(%Heddle{node: {:integer, min, max}}), do: [{:integer, min, max}]
+
+  defp do_shape(%Heddle{node: :char}), do: [{:integer, 0, 0x10FFFF}]
+
+  defp do_shape(%Heddle{node: :float}), do: [:float]
+
+  defp do_shape(%Heddle{node: {:binary, _, _}}), do: [:binary]
+
+  defp do_shape(%Heddle{node: {:list, _, _}}), do: [:list]
+
+  defp do_shape(%Heddle{node: {:tuple, elems}}),
+    do: [{:tuple, length(elems), shape_literal(List.first(elems))}]
+
+  defp do_shape(%Heddle{node: {:map, _, _}}), do: [:map]
+
+  defp do_shape(%Heddle{node: {:map_of, _, _, _}}), do: [:map]
+
+  defp do_shape(%Heddle{node: {:struct, module, _, _}}), do: [{:struct, module}]
+
+  defp do_shape(%Heddle{node: {:one_of, _, _, shapes}}), do: Enum.concat(shapes)
+
+  defp do_shape(%Heddle{node: {:refine, inner, _, _}}), do: do_shape(inner)
+
+  defp do_shape(%Heddle{node: {:iso, _, _, _}}), do: [:any]
+
+  defp do_shape(%Heddle{node: {:from, _, _}}), do: [:any]
+
+  defp do_shape(%Heddle{node: {:tuple_seq, _, _}}), do: [:any]
+
+  defp do_shape(%Heddle{node: {:lazy, _}} = codec), do: do_shape(force(codec))
+
+  defp do_shape(%Heddle{node: {:ref, module, name}}), do: summary_of_ref(module, name).shape
 
   defp shape_literal(nil), do: :any
 
@@ -363,31 +399,49 @@ defmodule Heddle.IR do
   @spec expected(Heddle.t()) :: [term()]
   def expected(%Heddle{} = codec), do: guarded(fn -> do_expected(codec) end)
 
-  defp do_expected(%Heddle{node: node} = codec) do
-    case node do
-      {:literal, a} -> [{:atom, a}]
-      {:enum, atoms, :reject} -> Enum.map(atoms, &{:atom, &1})
-      {:enum, atoms, :keep} -> Enum.map(atoms, &{:atom, &1}) ++ [:atom]
-      :existing_atom -> [:atom]
-      {:integer, min, max} -> [{:integer, min, max}]
-      :char -> [:char]
-      :float -> [:float]
-      {:binary, max, false} -> [{:binary, max}]
-      {:binary, max, true} -> [{:utf8, max}]
-      {:list, _, max} -> [{:list, max}]
-      {:tuple, elems} -> [tuple_expected(length(elems), first_literal(List.first(elems)))]
-      {:map, _, _} -> [:map]
-      {:map_of, _, _, max} -> [{:map, max}]
-      {:struct, module, _, _} -> [{:struct, module}]
-      {:one_of, alts, _, _} -> Enum.flat_map(alts, &do_expected/1)
-      {:iso, inner, _, _} -> do_expected(inner)
-      {:refine, inner, _, _} -> do_expected(inner)
-      {:from, inner, _} -> do_expected(inner)
-      {:lazy, _} -> do_expected(force(codec))
-      {:ref, module, name} -> summary_of_ref(module, name).expected
-      {:tuple_seq, tag, _} -> [{:tuple, tag}]
-    end
-  end
+  defp do_expected(%Heddle{node: {:literal, a}}), do: [{:atom, a}]
+
+  defp do_expected(%Heddle{node: {:enum, atoms, :reject}}), do: Enum.map(atoms, &{:atom, &1})
+
+  defp do_expected(%Heddle{node: {:enum, atoms, :keep}}),
+    do: Enum.map(atoms, &{:atom, &1}) ++ [:atom]
+
+  defp do_expected(%Heddle{node: :existing_atom}), do: [:atom]
+
+  defp do_expected(%Heddle{node: {:integer, min, max}}), do: [{:integer, min, max}]
+
+  defp do_expected(%Heddle{node: :char}), do: [:char]
+
+  defp do_expected(%Heddle{node: :float}), do: [:float]
+
+  defp do_expected(%Heddle{node: {:binary, max, false}}), do: [{:binary, max}]
+
+  defp do_expected(%Heddle{node: {:binary, max, true}}), do: [{:utf8, max}]
+
+  defp do_expected(%Heddle{node: {:list, _, max}}), do: [{:list, max}]
+
+  defp do_expected(%Heddle{node: {:tuple, elems}}),
+    do: [tuple_expected(length(elems), first_literal(List.first(elems)))]
+
+  defp do_expected(%Heddle{node: {:map, _, _}}), do: [:map]
+
+  defp do_expected(%Heddle{node: {:map_of, _, _, max}}), do: [{:map, max}]
+
+  defp do_expected(%Heddle{node: {:struct, module, _, _}}), do: [{:struct, module}]
+
+  defp do_expected(%Heddle{node: {:one_of, alts, _, _}}), do: Enum.flat_map(alts, &do_expected/1)
+
+  defp do_expected(%Heddle{node: {:iso, inner, _, _}}), do: do_expected(inner)
+
+  defp do_expected(%Heddle{node: {:refine, inner, _, _}}), do: do_expected(inner)
+
+  defp do_expected(%Heddle{node: {:from, inner, _}}), do: do_expected(inner)
+
+  defp do_expected(%Heddle{node: {:lazy, _}} = codec), do: do_expected(force(codec))
+
+  defp do_expected(%Heddle{node: {:ref, module, name}}), do: summary_of_ref(module, name).expected
+
+  defp do_expected(%Heddle{node: {:tuple_seq, tag, _}}), do: [{:tuple, tag}]
 
   defp tuple_expected(n, :any), do: {:tuple, n}
   defp tuple_expected(n, tag), do: {:tuple, n, tag}

@@ -26,96 +26,90 @@ if Code.ensure_loaded?(StreamData) do
     @spec from(Heddle.t()) :: StreamData.t(term())
     def from(codec), do: gen(IR.codec!(codec, "Heddle.Gen.from/1"), 0)
 
-    defp gen(%Heddle{node: node} = codec, depth) do
-      case node do
-        {:literal, atom} ->
-          StreamData.constant(atom)
+    defp gen(%Heddle{node: {:literal, atom}}, _depth), do: StreamData.constant(atom)
 
-        {:enum, atoms, :reject} ->
-          StreamData.member_of(atoms)
+    defp gen(%Heddle{node: {:enum, atoms, :reject}}, _depth), do: StreamData.member_of(atoms)
 
-        {:enum, atoms, :keep} ->
-          unknown = unknown_name(atoms) |> StreamData.map(&{:unknown, &1})
+    defp gen(%Heddle{node: {:enum, atoms, :keep}}, _depth) do
+      unknown = unknown_name(atoms) |> StreamData.map(&{:unknown, &1})
 
-          if atoms == [],
-            do: unknown,
-            else: StreamData.one_of([StreamData.member_of(atoms), unknown])
-
-        :existing_atom ->
-          StreamData.member_of(@existing_atoms)
-
-        {:integer, min, max} ->
-          integer(min, max)
-
-        :char ->
-          StreamData.one_of([StreamData.integer(0..0xD7FF), StreamData.integer(0xE000..0x10FFFF)])
-
-        :float ->
-          StreamData.float()
-
-        {:binary, max, true} ->
-          StreamData.string(:utf8, max_length: min(max || 32, 32))
-          |> StreamData.filter(&(max == nil or byte_size(&1) <= max))
-
-        {:binary, max, false} ->
-          StreamData.binary(max_length: min(max || 32, 32))
-
-        {:list, elem, max} ->
-          StreamData.list_of(gen(elem, depth + 1), max_length: list_max(max, depth))
-
-        {:tuple, elems} ->
-          elems |> Enum.map(&gen(&1, depth + 1)) |> List.to_tuple() |> StreamData.tuple()
-
-        {:map, required, optional} ->
-          required_map =
-            StreamData.fixed_map(Enum.map(required, fn {k, c} -> {k, gen(c, depth + 1)} end))
-
-          optional_map =
-            StreamData.optional_map(Enum.map(optional, fn {k, c} -> {k, gen(c, depth + 1)} end))
-
-          StreamData.bind(required_map, fn req ->
-            StreamData.map(optional_map, &Map.merge(req, &1))
-          end)
-
-        {:struct, module, _, fields} ->
-          fields
-          |> Enum.map(fn {name, c, _} -> {name, gen(c, depth + 1)} end)
-          |> StreamData.fixed_map()
-          |> StreamData.map(&Map.merge(Kernel.struct(module), &1))
-
-        {:map_of, key, value, max} ->
-          # Pairs collapse on duplicate keys, so small key spaces never stall.
-          {gen(key, depth + 1), gen(value, depth + 1)}
-          |> StreamData.tuple()
-          |> StreamData.list_of(max_length: list_max(max, depth))
-          |> StreamData.map(&(&1 |> Map.new() |> Map.delete(:__struct__)))
-
-        {:one_of, alts, _, _} ->
-          alts |> pick(depth) |> Enum.map(&gen(&1, depth)) |> StreamData.one_of()
-
-        {:iso, inner, decode, _} ->
-          inner
-          |> gen(depth)
-          |> StreamData.map(&decode.(&1))
-          |> StreamData.filter(&match?({:ok, _}, &1))
-          |> StreamData.map(fn {:ok, v} -> v end)
-
-        {:refine, inner, pred, _} ->
-          gen(inner, depth) |> StreamData.filter(&pred.(&1))
-
-        {:from, inner, _} ->
-          gen(inner, depth)
-
-        {:lazy, _} ->
-          gen(IR.force(codec), depth + 1)
-
-        {:ref, module, name} ->
-          gen(IR.ir_of_ref(module, name), depth + 1)
-
-        {:tuple_seq, _tag, seq} ->
-          gen_seq(seq, depth + 1)
-      end
+      if atoms == [],
+        do: unknown,
+        else: StreamData.one_of([StreamData.member_of(atoms), unknown])
     end
+
+    defp gen(%Heddle{node: :existing_atom}, _depth), do: StreamData.member_of(@existing_atoms)
+
+    defp gen(%Heddle{node: {:integer, min, max}}, _depth), do: integer(min, max)
+
+    defp gen(%Heddle{node: :char}, _depth),
+      do: StreamData.one_of([StreamData.integer(0..0xD7FF), StreamData.integer(0xE000..0x10FFFF)])
+
+    defp gen(%Heddle{node: :float}, _depth), do: StreamData.float()
+
+    defp gen(%Heddle{node: {:binary, max, true}}, _depth) do
+      StreamData.string(:utf8, max_length: min(max || 32, 32))
+      |> StreamData.filter(&(max == nil or byte_size(&1) <= max))
+    end
+
+    defp gen(%Heddle{node: {:binary, max, false}}, _depth),
+      do: StreamData.binary(max_length: min(max || 32, 32))
+
+    defp gen(%Heddle{node: {:list, elem, max}}, depth),
+      do: StreamData.list_of(gen(elem, depth + 1), max_length: list_max(max, depth))
+
+    defp gen(%Heddle{node: {:tuple, elems}}, depth),
+      do: elems |> Enum.map(&gen(&1, depth + 1)) |> List.to_tuple() |> StreamData.tuple()
+
+    defp gen(%Heddle{node: {:map, required, optional}}, depth) do
+      required_map =
+        StreamData.fixed_map(Enum.map(required, fn {k, c} -> {k, gen(c, depth + 1)} end))
+
+      optional_map =
+        StreamData.optional_map(Enum.map(optional, fn {k, c} -> {k, gen(c, depth + 1)} end))
+
+      StreamData.bind(required_map, fn req ->
+        StreamData.map(optional_map, &Map.merge(req, &1))
+      end)
+    end
+
+    defp gen(%Heddle{node: {:struct, module, _, fields}}, depth) do
+      fields
+      |> Enum.map(fn {name, c, _} -> {name, gen(c, depth + 1)} end)
+      |> StreamData.fixed_map()
+      |> StreamData.map(&Map.merge(Kernel.struct(module), &1))
+    end
+
+    defp gen(%Heddle{node: {:map_of, key, value, max}}, depth) do
+      # Pairs collapse on duplicate keys, so small key spaces never stall.
+      {gen(key, depth + 1), gen(value, depth + 1)}
+      |> StreamData.tuple()
+      |> StreamData.list_of(max_length: list_max(max, depth))
+      |> StreamData.map(&(&1 |> Map.new() |> Map.delete(:__struct__)))
+    end
+
+    defp gen(%Heddle{node: {:one_of, alts, _, _}}, depth),
+      do: alts |> pick(depth) |> Enum.map(&gen(&1, depth)) |> StreamData.one_of()
+
+    defp gen(%Heddle{node: {:iso, inner, decode, _}}, depth) do
+      inner
+      |> gen(depth)
+      |> StreamData.map(&decode.(&1))
+      |> StreamData.filter(&match?({:ok, _}, &1))
+      |> StreamData.map(fn {:ok, v} -> v end)
+    end
+
+    defp gen(%Heddle{node: {:refine, inner, pred, _}}, depth),
+      do: gen(inner, depth) |> StreamData.filter(&pred.(&1))
+
+    defp gen(%Heddle{node: {:from, inner, _}}, depth), do: gen(inner, depth)
+
+    defp gen(%Heddle{node: {:lazy, _}} = codec, depth), do: gen(IR.force(codec), depth + 1)
+
+    defp gen(%Heddle{node: {:ref, module, name}}, depth),
+      do: gen(IR.ir_of_ref(module, name), depth + 1)
+
+    defp gen(%Heddle{node: {:tuple_seq, _tag, seq}}, depth), do: gen_seq(seq, depth + 1)
 
     defp gen_seq(%Heddle{node: {:pure, value}}, _depth), do: StreamData.constant(value)
 

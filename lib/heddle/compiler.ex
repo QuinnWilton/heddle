@@ -16,7 +16,7 @@ defmodule Heddle.Compiler do
   # interpreter and is reported as opaque.
 
   alias Heddle.{CodecError, ETF, IR}
-  alias Heddle.Compiler.Expr
+  alias Heddle.Compiler.{Expr, Seq}
   alias Heddle.IR.{Field, FunRef, Param}
 
   @finite_values 64
@@ -328,146 +328,186 @@ defmodule Heddle.Compiler do
   defp lazy_key(%FunRef{id: id, bindings: bindings}), do: {:funref, id, bindings}
   defp lazy_key(fun), do: {:fun, fun}
 
-  defp dec_node(codec, node, pctx) do
+  defp dec_node(codec, {:literal, atom}, pctx) do
     expected = expected_ast(codec, pctx)
 
-    case node do
-      {:literal, atom} ->
-        consuming(
-          pctx,
-          atom_dispatch([atom], quote(do: Heddle.Runtime.atom_failure(rest, unquote(expected))))
-        )
+    consuming(
+      pctx,
+      atom_dispatch([atom], quote(do: Heddle.Runtime.atom_failure(rest, unquote(expected))))
+    )
+  end
 
-      {:enum, atoms, :reject} ->
-        consuming(
-          pctx,
-          atom_dispatch(atoms, quote(do: Heddle.Runtime.atom_failure(rest, unquote(expected))))
-        )
+  defp dec_node(codec, {:enum, atoms, :reject}, pctx) do
+    expected = expected_ast(codec, pctx)
 
-      {:enum, atoms, :keep} ->
-        names = Macro.escape(Map.new(atoms, &{Atom.to_string(&1), &1}))
+    consuming(
+      pctx,
+      atom_dispatch(atoms, quote(do: Heddle.Runtime.atom_failure(rest, unquote(expected))))
+    )
+  end
 
-        fallback =
-          quote(
-            do: Heddle.Runtime.read_enum(rest, nodes, unquote(names), :keep, unquote(expected))
-          )
+  defp dec_node(codec, {:enum, atoms, :keep}, pctx) do
+    expected = expected_ast(codec, pctx)
 
-        consuming(pctx, atom_dispatch(atoms, fallback))
+    names = Macro.escape(Map.new(atoms, &{Atom.to_string(&1), &1}))
 
-      :existing_atom ->
-        consuming(
-          pctx,
-          quote(do: Heddle.Runtime.read_existing_atom(rest, nodes, unquote(expected)))
-        )
+    fallback =
+      quote(do: Heddle.Runtime.read_enum(rest, nodes, unquote(names), :keep, unquote(expected)))
 
-      {:integer, min, max} ->
-        consuming(pctx, dec_integer(min, max, expected, pctx))
+    consuming(pctx, atom_dispatch(atoms, fallback))
+  end
 
-      :char ->
-        consuming(pctx, quote(do: Heddle.Runtime.read_char(rest, nodes, unquote(expected))))
+  defp dec_node(codec, :existing_atom, pctx) do
+    expected = expected_ast(codec, pctx)
 
-      :float ->
-        consuming(
-          pctx,
-          quote do
-            case rest do
-              <<70, f::float-64, after_term::binary>> -> {:ok, f, after_term, nodes}
-              _ -> Heddle.Runtime.read_float(rest, nodes, unquote(expected))
+    consuming(
+      pctx,
+      quote(do: Heddle.Runtime.read_existing_atom(rest, nodes, unquote(expected)))
+    )
+  end
+
+  defp dec_node(codec, {:integer, min, max}, pctx) do
+    expected = expected_ast(codec, pctx)
+
+    consuming(pctx, dec_integer(min, max, expected, pctx))
+  end
+
+  defp dec_node(codec, :char, pctx) do
+    expected = expected_ast(codec, pctx)
+
+    consuming(pctx, quote(do: Heddle.Runtime.read_char(rest, nodes, unquote(expected))))
+  end
+
+  defp dec_node(codec, :float, pctx) do
+    expected = expected_ast(codec, pctx)
+
+    consuming(
+      pctx,
+      quote do
+        case rest do
+          <<70, f::float-64, after_term::binary>> -> {:ok, f, after_term, nodes}
+          _ -> Heddle.Runtime.read_float(rest, nodes, unquote(expected))
+        end
+      end
+    )
+  end
+
+  defp dec_node(codec, {:binary, max, utf8}, pctx) do
+    expected = expected_ast(codec, pctx)
+
+    consuming(pctx, dec_binary(max, utf8, expected, pctx))
+  end
+
+  defp dec_node(codec, {:list, elem, max}, pctx) do
+    expected = expected_ast(codec, pctx)
+
+    dec_list(elem, max, expected, pctx)
+  end
+
+  defp dec_node(codec, {:tuple, elems}, pctx) do
+    expected = expected_ast(codec, pctx)
+
+    consuming(
+      pctx,
+      dec_tuple_body(elems, expected, pctx, fn tuple ->
+        quote(do: {:ok, unquote(tuple), body, nodes})
+      end)
+    )
+  end
+
+  defp dec_node(codec, {:map, required, optional}, pctx) do
+    expected = expected_ast(codec, pctx)
+
+    named = required ++ optional
+    required_keys = Enum.map(required, &elem(&1, 0))
+    consuming(pctx, dec_keyed_map(named, required_keys, expected, pctx, quote(do: acc)))
+  end
+
+  defp dec_node(codec, {:struct, module, :map, fields}, pctx) do
+    expected = expected_ast(codec, pctx)
+
+    consuming(pctx, dec_struct_map(module, fields, expected, pctx))
+  end
+
+  defp dec_node(codec, {:struct, module, {:tuple, tag}, fields}, pctx) do
+    expected = expected_ast(codec, pctx)
+
+    codecs = Enum.map(fields, &elem(&1, 1))
+    elems = if tag, do: [%Heddle{node: {:literal, tag}} | codecs], else: codecs
+    names = Enum.map(fields, &elem(&1, 0))
+    drop = if tag, do: 1, else: 0
+
+    consuming(
+      pctx,
+      dec_tuple_body(elems, expected, pctx, fn tuple ->
+        quote do
+          unquote(tuple_vars_to_struct(module, names, tuple, drop))
+          {:ok, struct, body, nodes}
+        end
+      end)
+    )
+  end
+
+  defp dec_node(codec, {:map_of, key, value, max}, pctx) do
+    expected = expected_ast(codec, pctx)
+
+    dec_map_of(key, value, max, expected, pctx)
+  end
+
+  defp dec_node(codec, {:one_of, alts, firsts, _}, pctx) do
+    expected = expected_ast(codec, pctx)
+
+    dec_one_of(alts, firsts, expected, pctx)
+  end
+
+  defp dec_node(_codec, {:iso, inner, decode, _}, pctx) do
+    inner_caller = dec(inner, pctx)
+    inner_expected = expected_ast(inner, pctx)
+
+    wrapper(
+      pctx,
+      quote do
+        case unquote(invoke_dec(inner_caller, pctx)) do
+          {:ok, value, after_term, nodes} ->
+            case Heddle.Runtime.call_iso(unquote(fun_ast(decode)), value) do
+              {:ok, result} -> {:ok, result, after_term, nodes}
+              :error -> Heddle.Runtime.fail(:iso, unquote(inner_expected), rest)
             end
-          end
-        )
 
-      {:binary, max, utf8} ->
-        consuming(pctx, dec_binary(max, utf8, expected, pctx))
+          error ->
+            error
+        end
+      end
+    )
+  end
 
-      {:list, elem, max} ->
-        dec_list(elem, max, expected, pctx)
+  defp dec_node(_codec, {:refine, inner, pred, reason}, pctx) do
+    inner_caller = dec(inner, pctx)
+    inner_expected = expected_ast(inner, pctx)
 
-      {:tuple, elems} ->
-        consuming(
-          pctx,
-          dec_tuple_body(elems, expected, pctx, fn tuple ->
-            quote(do: {:ok, unquote(tuple), body, nodes})
-          end)
-        )
+    wrapper(
+      pctx,
+      quote do
+        case unquote(invoke_dec(inner_caller, pctx)) do
+          {:ok, value, after_term, nodes} ->
+            if unquote(fun_ast(pred)).(value),
+              do: {:ok, value, after_term, nodes},
+              else:
+                Heddle.Runtime.fail(
+                  {:refine, unquote(escape!(reason))},
+                  unquote(inner_expected),
+                  rest
+                )
 
-      {:map, required, optional} ->
-        named = required ++ optional
-        required_keys = Enum.map(required, &elem(&1, 0))
-        consuming(pctx, dec_keyed_map(named, required_keys, expected, pctx, quote(do: acc)))
+          error ->
+            error
+        end
+      end
+    )
+  end
 
-      {:struct, module, :map, fields} ->
-        consuming(pctx, dec_struct_map(module, fields, expected, pctx))
-
-      {:struct, module, {:tuple, tag}, fields} ->
-        codecs = Enum.map(fields, &elem(&1, 1))
-        elems = if tag, do: [%Heddle{node: {:literal, tag}} | codecs], else: codecs
-        names = Enum.map(fields, &elem(&1, 0))
-        drop = if tag, do: 1, else: 0
-
-        consuming(
-          pctx,
-          dec_tuple_body(elems, expected, pctx, fn tuple ->
-            quote do
-              unquote(tuple_vars_to_struct(module, names, tuple, drop))
-              {:ok, struct, body, nodes}
-            end
-          end)
-        )
-
-      {:map_of, key, value, max} ->
-        dec_map_of(key, value, max, expected, pctx)
-
-      {:one_of, alts, firsts, _} ->
-        dec_one_of(alts, firsts, expected, pctx)
-
-      {:iso, inner, decode, _} ->
-        inner_caller = dec(inner, pctx)
-        inner_expected = expected_ast(inner, pctx)
-
-        wrapper(
-          pctx,
-          quote do
-            case unquote(invoke_dec(inner_caller, pctx)) do
-              {:ok, value, after_term, nodes} ->
-                case Heddle.Runtime.call_iso(unquote(fun_ast(decode)), value) do
-                  {:ok, result} -> {:ok, result, after_term, nodes}
-                  :error -> Heddle.Runtime.fail(:iso, unquote(inner_expected), rest)
-                end
-
-              error ->
-                error
-            end
-          end
-        )
-
-      {:refine, inner, pred, reason} ->
-        inner_caller = dec(inner, pctx)
-        inner_expected = expected_ast(inner, pctx)
-
-        wrapper(
-          pctx,
-          quote do
-            case unquote(invoke_dec(inner_caller, pctx)) do
-              {:ok, value, after_term, nodes} ->
-                if unquote(fun_ast(pred)).(value),
-                  do: {:ok, value, after_term, nodes},
-                  else:
-                    Heddle.Runtime.fail(
-                      {:refine, unquote(escape!(reason))},
-                      unquote(inner_expected),
-                      rest
-                    )
-
-              error ->
-                error
-            end
-          end
-        )
-
-      {:tuple_seq, tag, seq} ->
-        Heddle.Compiler.Seq.dec(codec, tag, seq, pctx)
-    end
+  defp dec_node(codec, {:tuple_seq, tag, seq}, pctx) do
+    Seq.dec(codec, tag, seq, pctx)
   end
 
   # Binds `struct` to the struct built from a decoded tuple's elements.
@@ -615,8 +655,7 @@ defmodule Heddle.Compiler do
                  Heddle.Runtime.check_count(
                    n,
                    unquote(count),
-                   2,
-                   byte_size(body),
+                   {2, byte_size(body)},
                    2,
                    nodes,
                    unquote(expected),
@@ -745,6 +784,70 @@ defmodule Heddle.Compiler do
     string_loop = fresh(:sl)
     loop_extra = if pctx, do: [quote(do: ps)], else: []
 
+    define_list_loop(list_loop, elem, elem_caller, pctx, loop_extra)
+    define_string_loop(string_loop, elem_caller, loop_extra)
+    string_body = string_body(elem, string_loop, loop_extra)
+
+    consuming(
+      pctx,
+      quote do
+        case rest do
+          <<106, after_term::binary>> ->
+            {:ok, [], after_term, nodes}
+
+          <<107, len::16, body::binary>> ->
+            case Heddle.Runtime.check_count(
+                   len,
+                   unquote(max_ast),
+                   {1, byte_size(body)},
+                   1,
+                   nodes,
+                   unquote(expected),
+                   rest,
+                   lim
+                 ) do
+              :ok -> unquote(string_body)
+              error -> error
+            end
+
+          <<108, n::32, body::binary>> ->
+            case Heddle.Runtime.check_count(
+                   n,
+                   unquote(max_ast),
+                   {1, byte_size(body) - 1},
+                   1,
+                   nodes,
+                   unquote(expected),
+                   rest,
+                   lim
+                 ) do
+              :ok ->
+                unquote(list_loop)(
+                  body,
+                  n,
+                  0,
+                  depth + 1,
+                  nodes,
+                  lim,
+                  [],
+                  unquote_splicing(loop_extra)
+                )
+
+              error ->
+                error
+            end
+
+          <<tag, _::binary>> when tag in [107, 108] ->
+            Heddle.Runtime.fail(:unexpected_eof, unquote(expected), rest)
+
+          _ ->
+            Heddle.Runtime.fail(:unexpected, unquote(expected), rest)
+        end
+      end
+    )
+  end
+
+  defp define_list_loop(list_loop, elem, elem_caller, pctx, loop_extra) do
     # LIST_EXT: n elements, then the tail.
     add_def(
       defp_ast(
@@ -819,7 +922,9 @@ defmodule Heddle.Compiler do
         end
       )
     )
+  end
 
+  defp define_string_loop(string_loop, elem_caller, loop_extra) do
     # STRING_EXT: each byte as a SMALL_INTEGER_EXT.
     add_def(
       defp_ast(
@@ -882,7 +987,9 @@ defmodule Heddle.Compiler do
         end
       )
     )
+  end
 
+  defp string_body(elem, string_loop, loop_extra) do
     generic =
       quote(
         do:
@@ -910,85 +1017,23 @@ defmodule Heddle.Compiler do
            binary_part(body, len, byte_size(body) - len), nodes - len}
       )
 
-    string_body =
-      case string_elements(elem) do
-        :all ->
-          quote(
-            do:
-              if(len == 0 or depth + 1 <= elem(lim, 0), do: unquote(fast), else: unquote(generic))
-          )
+    case string_elements(elem) do
+      :all ->
+        quote(
+          do: if(len == 0 or depth + 1 <= elem(lim, 0), do: unquote(fast), else: unquote(generic))
+        )
 
-        {:range, lo, hi} ->
-          quote do
-            if (len == 0 or depth + 1 <= elem(lim, 0)) and
-                 Heddle.SWAR.bytes_in?(binary_part(body, 0, len), unquote(lo), unquote(hi)),
-               do: unquote(fast),
-               else: unquote(generic)
-          end
-
-        nil ->
-          generic
-      end
-
-    consuming(
-      pctx,
-      quote do
-        case rest do
-          <<106, after_term::binary>> ->
-            {:ok, [], after_term, nodes}
-
-          <<107, len::16, body::binary>> ->
-            case Heddle.Runtime.check_count(
-                   len,
-                   unquote(max_ast),
-                   1,
-                   byte_size(body),
-                   1,
-                   nodes,
-                   unquote(expected),
-                   rest,
-                   lim
-                 ) do
-              :ok -> unquote(string_body)
-              error -> error
-            end
-
-          <<108, n::32, body::binary>> ->
-            case Heddle.Runtime.check_count(
-                   n,
-                   unquote(max_ast),
-                   1,
-                   byte_size(body) - 1,
-                   1,
-                   nodes,
-                   unquote(expected),
-                   rest,
-                   lim
-                 ) do
-              :ok ->
-                unquote(list_loop)(
-                  body,
-                  n,
-                  0,
-                  depth + 1,
-                  nodes,
-                  lim,
-                  [],
-                  unquote_splicing(loop_extra)
-                )
-
-              error ->
-                error
-            end
-
-          <<tag, _::binary>> when tag in [107, 108] ->
-            Heddle.Runtime.fail(:unexpected_eof, unquote(expected), rest)
-
-          _ ->
-            Heddle.Runtime.fail(:unexpected, unquote(expected), rest)
+      {:range, lo, hi} ->
+        quote do
+          if (len == 0 or depth + 1 <= elem(lim, 0)) and
+               Heddle.SWAR.bytes_in?(binary_part(body, 0, len), unquote(lo), unquote(hi)),
+             do: unquote(fast),
+             else: unquote(generic)
         end
-      end
-    )
+
+      nil ->
+        generic
+    end
   end
 
   # Head patterns for leaf elements, each {pattern, guard, value}: special
@@ -1185,8 +1230,7 @@ defmodule Heddle.Compiler do
                  Heddle.Runtime.check_count(
                    n,
                    unquote(count),
-                   2,
-                   byte_size(body),
+                   {2, byte_size(body)},
                    2,
                    nodes,
                    unquote(expected),
@@ -1287,8 +1331,7 @@ defmodule Heddle.Compiler do
             case Heddle.Runtime.check_count(
                    n,
                    unquote(max_ast),
-                   2,
-                   byte_size(body),
+                   {2, byte_size(body)},
                    2,
                    nodes,
                    unquote(expected),
@@ -1392,220 +1435,256 @@ defmodule Heddle.Compiler do
     end
   end
 
-  defp enc_node(node, codec, pctx) do
+  defp enc_node({:literal, atom}, _codec, pctx) do
     v = quote(do: value)
 
-    case node do
-      {:literal, atom} ->
-        encoder(pctx, [
-          {v, quote(do: value === unquote(atom)),
-           quote(do: {:ok, unquote(atom), unquote(ETF.encode_atom(atom))})},
-          {v, nil, quote(do: {:error, {[], {:type, {:atom, unquote(atom)}, value}}})}
-        ])
+    encoder(pctx, [
+      {v, quote(do: value === unquote(atom)),
+       quote(do: {:ok, unquote(atom), unquote(ETF.encode_atom(atom))})},
+      {v, nil, quote(do: {:error, {[], {:type, {:atom, unquote(atom)}, value}}})}
+    ])
+  end
 
-      {:enum, atoms, unknown} ->
-        members =
-          for atom <- atoms do
-            {v, quote(do: value === unquote(atom)),
-             quote(do: {:ok, unquote(atom), unquote(ETF.encode_atom(atom))})}
-          end
+  defp enc_node({:enum, atoms, unknown}, _codec, pctx) do
+    v = quote(do: value)
 
-        encoder(
-          pctx,
-          members ++
-            [
-              {v, nil,
-               quote(do: Heddle.Runtime.enc_enum(value, unquote(atoms), unquote(unknown)))}
-            ]
-        )
+    members =
+      for atom <- atoms do
+        {v, quote(do: value === unquote(atom)),
+         quote(do: {:ok, unquote(atom), unquote(ETF.encode_atom(atom))})}
+      end
 
-      :existing_atom ->
-        encoder(pctx, [{v, nil, quote(do: Heddle.Runtime.enc_existing_atom(value))}])
+    encoder(
+      pctx,
+      members ++
+        [
+          {v, nil, quote(do: Heddle.Runtime.enc_enum(value, unquote(atoms), unquote(unknown)))}
+        ]
+    )
+  end
 
-      {:integer, min, max} ->
-        min_ast = bound_ast(min, pctx)
-        max_ast = bound_ast(max, pctx)
+  defp enc_node(:existing_atom, _codec, pctx) do
+    v = quote(do: value)
 
-        guard =
-          quote(
-            do:
-              is_integer(value) and value >= 0 and value <= 255 and
-                unquote(range_guard(v, min, max, min_ast, max_ast))
+    encoder(pctx, [{v, nil, quote(do: Heddle.Runtime.enc_existing_atom(value))}])
+  end
+
+  defp enc_node({:integer, min, max}, _codec, pctx) do
+    v = quote(do: value)
+
+    min_ast = bound_ast(min, pctx)
+    max_ast = bound_ast(max, pctx)
+
+    guard =
+      quote(
+        do:
+          is_integer(value) and value >= 0 and value <= 255 and
+            unquote(range_guard(v, min, max, min_ast, max_ast))
+      )
+
+    encoder(pctx, [
+      {v, guard, quote(do: {:ok, value, <<97, value>>})},
+      {v, nil, quote(do: Heddle.Runtime.enc_integer(value, unquote(min_ast), unquote(max_ast)))}
+    ])
+  end
+
+  defp enc_node(:char, _codec, pctx) do
+    v = quote(do: value)
+
+    encoder(pctx, [{v, nil, quote(do: Heddle.Runtime.enc_char(value))}])
+  end
+
+  defp enc_node(:float, _codec, pctx) do
+    v = quote(do: value)
+
+    encoder(pctx, [
+      {v, quote(do: is_float(value)), quote(do: {:ok, value, <<70, value::float-64>>})},
+      {v, nil, quote(do: Heddle.Runtime.enc_float(value))}
+    ])
+  end
+
+  defp enc_node({:binary, max, utf8}, _codec, pctx) do
+    v = quote(do: value)
+
+    max_ast = bound_ast(max, pctx)
+
+    size_guard =
+      if max == nil, do: true, else: quote(do: byte_size(value) <= unquote(max_ast))
+
+    fast =
+      if utf8,
+        do: [],
+        else: [
+          {v, quote(do: is_binary(value) and unquote(size_guard)),
+           quote(do: {:ok, value, [<<109, byte_size(value)::32>>, value]})}
+        ]
+
+    encoder(
+      pctx,
+      fast ++
+        [
+          {v, nil, quote(do: Heddle.Runtime.enc_binary(value, unquote(max_ast), unquote(utf8)))}
+        ]
+    )
+  end
+
+  defp enc_node({:list, elem, max}, _codec, pctx) do
+    v = quote(do: value)
+
+    elem_caller = enc(elem, pctx)
+
+    generic =
+      quote(
+        do:
+          Heddle.Runtime.enc_list(
+            value,
+            unquote(bound_ast(max, pctx)),
+            unquote(enc_capture(elem_caller))
           )
+      )
 
-        encoder(pctx, [
-          {v, guard, quote(do: {:ok, value, <<97, value>>})},
-          {v, nil,
-           quote(do: Heddle.Runtime.enc_integer(value, unquote(min_ast), unquote(max_ast)))}
-        ])
+    # A list of integers that each encode as SMALL_INTEGER_EXT is the
+    # STRING_EXT the generic path would build, written in one step.
+    fast =
+      case {pctx, string_elements(elem)} do
+        {nil, :all} -> [{v, nil, string_encode(0, 255, max, generic)}]
+        {nil, {:range, lo, hi}} -> [{v, nil, string_encode(lo, hi, max, generic)}]
+        _ -> []
+      end
 
-      :char ->
-        encoder(pctx, [{v, nil, quote(do: Heddle.Runtime.enc_char(value))}])
+    encoder(pctx, if(fast == [], do: [{v, nil, generic}], else: fast))
+  end
 
-      :float ->
-        encoder(pctx, [
-          {v, quote(do: is_float(value)), quote(do: {:ok, value, <<70, value::float-64>>})},
-          {v, nil, quote(do: Heddle.Runtime.enc_float(value))}
-        ])
+  defp enc_node({:tuple, elems}, _codec, pctx) do
+    enc_tuple(elems, pctx)
+  end
 
-      {:binary, max, utf8} ->
-        max_ast = bound_ast(max, pctx)
+  defp enc_node({:map, required, optional}, _codec, pctx) do
+    v = quote(do: value)
 
-        size_guard =
-          if max == nil, do: true, else: quote(do: byte_size(value) <= unquote(max_ast))
+    encoder(pctx, [
+      {v, nil,
+       quote(
+         do:
+           Heddle.Runtime.enc_map(
+             value,
+             unquote(field_encoders(required, pctx)),
+             unquote(field_encoders(optional, pctx))
+           )
+       )}
+    ])
+  end
 
-        fast =
-          if utf8,
-            do: [],
-            else: [
-              {v, quote(do: is_binary(value) and unquote(size_guard)),
-               quote(do: {:ok, value, [<<109, byte_size(value)::32>>, value]})}
-            ]
+  defp enc_node({:struct, module, layout, fields}, _codec, pctx) do
+    enc_struct(module, layout, fields, pctx)
+  end
 
-        encoder(
-          pctx,
-          fast ++
-            [
-              {v, nil,
-               quote(do: Heddle.Runtime.enc_binary(value, unquote(max_ast), unquote(utf8)))}
-            ]
-        )
+  defp enc_node({:map_of, key, val, max}, _codec, pctx) do
+    v = quote(do: value)
 
-      {:list, elem, max} ->
-        elem_caller = enc(elem, pctx)
+    key_caller = enc(key, pctx)
+    val_caller = enc(val, pctx)
 
-        generic =
-          quote(
-            do:
-              Heddle.Runtime.enc_list(
-                value,
-                unquote(bound_ast(max, pctx)),
-                unquote(enc_capture(elem_caller))
-              )
-          )
+    encoder(pctx, [
+      {v, nil,
+       quote(
+         do:
+           Heddle.Runtime.enc_map_of(
+             value,
+             unquote(bound_ast(max, pctx)),
+             unquote(enc_capture(key_caller)),
+             unquote(enc_capture(val_caller))
+           )
+       )}
+    ])
+  end
 
-        # A list of integers that each encode as SMALL_INTEGER_EXT is the
-        # STRING_EXT the generic path would build, written in one step.
-        fast =
-          case {pctx, string_elements(elem)} do
-            {nil, :all} -> [{v, nil, string_encode(0, 255, max, generic)}]
-            {nil, {:range, lo, hi}} -> [{v, nil, string_encode(lo, hi, max, generic)}]
-            _ -> []
-          end
+  defp enc_node({:one_of, alts, _, shapes}, _codec, pctx) do
+    v = quote(do: value)
 
-        encoder(pctx, if(fast == [], do: [{v, nil, generic}], else: fast))
+    branches =
+      alts
+      |> Enum.zip(shapes)
+      |> Enum.map(fn {alt, items} ->
+        test =
+          items
+          |> Enum.map(&shape_test/1)
+          |> Enum.reduce(fn t, acc -> quote(do: unquote(acc) or unquote(t)) end)
 
-      {:tuple, elems} ->
-        enc_tuple(elems, pctx)
+        {:->, [], [[test], invoke_enc(enc(alt, pctx), v, pctx)]}
+      end)
 
-      {:map, required, optional} ->
-        encoder(pctx, [
-          {v, nil,
-           quote(
-             do:
-               Heddle.Runtime.enc_map(
-                 value,
-                 unquote(field_encoders(required, pctx)),
-                 unquote(field_encoders(optional, pctx))
-               )
-           )}
-        ])
+    fallback = {:->, [], [[true], quote(do: {:error, {[], {:no_alternative, value}}})]}
+    encoder(pctx, [{v, nil, {:cond, [], [[do: branches ++ [fallback]]]}}])
+  end
 
-      {:struct, module, layout, fields} ->
-        enc_struct(module, layout, fields, pctx)
+  defp enc_node({:iso, inner, decode, encode}, _codec, pctx) do
+    v = quote(do: value)
 
-      {:map_of, key, val, max} ->
-        key_caller = enc(key, pctx)
-        val_caller = enc(val, pctx)
+    inner_caller = enc(inner, pctx)
 
-        encoder(pctx, [
-          {v, nil,
-           quote(
-             do:
-               Heddle.Runtime.enc_map_of(
-                 value,
-                 unquote(bound_ast(max, pctx)),
-                 unquote(enc_capture(key_caller)),
-                 unquote(enc_capture(val_caller))
-               )
-           )}
-        ])
-
-      {:one_of, alts, _, shapes} ->
-        branches =
-          alts
-          |> Enum.zip(shapes)
-          |> Enum.map(fn {alt, items} ->
-            test =
-              items
-              |> Enum.map(&shape_test/1)
-              |> Enum.reduce(fn t, acc -> quote(do: unquote(acc) or unquote(t)) end)
-
-            {:->, [], [[test], invoke_enc(enc(alt, pctx), v, pctx)]}
-          end)
-
-        fallback = {:->, [], [[true], quote(do: {:error, {[], {:no_alternative, value}}})]}
-        encoder(pctx, [{v, nil, {:cond, [], [[do: branches ++ [fallback]]]}}])
-
-      {:iso, inner, decode, encode} ->
-        inner_caller = enc(inner, pctx)
-
-        encoder(pctx, [
-          {v, nil,
-           quote do
-             case Heddle.Runtime.call_iso(unquote(fun_ast(encode)), value) do
-               {:ok, inner_value} ->
-                 case unquote(invoke_enc(inner_caller, quote(do: inner_value), pctx)) do
-                   {:ok, inner_y, iodata} ->
-                     case Heddle.Runtime.call_iso(unquote(fun_ast(decode)), inner_y) do
-                       {:ok, y} -> {:ok, y, iodata}
-                       :error -> {:error, {[], {:iso, value}}}
-                     end
-
-                   error ->
-                     error
+    encoder(pctx, [
+      {v, nil,
+       quote do
+         case Heddle.Runtime.call_iso(unquote(fun_ast(encode)), value) do
+           {:ok, inner_value} ->
+             case unquote(invoke_enc(inner_caller, quote(do: inner_value), pctx)) do
+               {:ok, inner_y, iodata} ->
+                 case Heddle.Runtime.call_iso(unquote(fun_ast(decode)), inner_y) do
+                   {:ok, y} -> {:ok, y, iodata}
+                   :error -> {:error, {[], {:iso, value}}}
                  end
-
-               :error ->
-                 {:error, {[], {:iso, value}}}
-             end
-           end}
-        ])
-
-      {:refine, inner, pred, reason} ->
-        inner_caller = enc(inner, pctx)
-
-        encoder(pctx, [
-          {v, nil,
-           quote do
-             case unquote(invoke_enc(inner_caller, v, pctx)) do
-               {:ok, y, iodata} ->
-                 if unquote(fun_ast(pred)).(y),
-                   do: {:ok, y, iodata},
-                   else: {:error, {[], {:refine, unquote(escape!(reason)), value}}}
 
                error ->
                  error
              end
-           end}
-        ])
 
-      {:from, inner, getter} ->
-        inner_caller = enc(inner, pctx)
+           :error ->
+             {:error, {[], {:iso, value}}}
+         end
+       end}
+    ])
+  end
 
-        encoder(pctx, [
-          {v, nil,
-           quote do
-             case Heddle.Runtime.get(unquote(getter_ast(getter)), value) do
-               {:ok, part} -> unquote(invoke_enc(inner_caller, quote(do: part), pctx))
-               :error -> {:error, {[], {:getter, value}}}
-             end
-           end}
-        ])
+  defp enc_node({:refine, inner, pred, reason}, _codec, pctx) do
+    v = quote(do: value)
 
-      {:tuple_seq, tag, seq} ->
-        Heddle.Compiler.Seq.enc(codec, tag, seq, pctx)
-    end
+    inner_caller = enc(inner, pctx)
+
+    encoder(pctx, [
+      {v, nil,
+       quote do
+         case unquote(invoke_enc(inner_caller, v, pctx)) do
+           {:ok, y, iodata} ->
+             if unquote(fun_ast(pred)).(y),
+               do: {:ok, y, iodata},
+               else: {:error, {[], {:refine, unquote(escape!(reason)), value}}}
+
+           error ->
+             error
+         end
+       end}
+    ])
+  end
+
+  defp enc_node({:from, inner, getter}, _codec, pctx) do
+    v = quote(do: value)
+
+    inner_caller = enc(inner, pctx)
+
+    encoder(pctx, [
+      {v, nil,
+       quote do
+         case Heddle.Runtime.get(unquote(getter_ast(getter)), value) do
+           {:ok, part} -> unquote(invoke_enc(inner_caller, quote(do: part), pctx))
+           :error -> {:error, {[], {:getter, value}}}
+         end
+       end}
+    ])
+  end
+
+  defp enc_node({:tuple_seq, tag, seq}, codec, pctx) do
+    Seq.enc(codec, tag, seq, pctx)
   end
 
   defp string_encode(lo, hi, max, generic) do
@@ -1729,44 +1808,32 @@ defmodule Heddle.Compiler do
   end
 
   # Code equivalent to IR.shape_matches?/2.
-  defp shape_test(item) do
-    case item do
-      :any ->
-        true
+  defp shape_test(:any), do: true
 
-      {:atom, a} ->
-        quote(do: value === unquote(a))
+  defp shape_test({:atom, a}), do: quote(do: value === unquote(a))
 
-      :any_atom ->
-        quote(do: is_atom(value))
+  defp shape_test(:any_atom), do: quote(do: is_atom(value))
 
-      {:integer, lo, hi} ->
-        quote(do: is_integer(value) and unquote(range_guard(quote(do: value), lo, hi, lo, hi)))
+  defp shape_test({:integer, lo, hi}),
+    do: quote(do: is_integer(value) and unquote(range_guard(quote(do: value), lo, hi, lo, hi)))
 
-      :float ->
-        quote(do: is_float(value))
+  defp shape_test(:float), do: quote(do: is_float(value))
 
-      :binary ->
-        quote(do: is_binary(value))
+  defp shape_test(:binary), do: quote(do: is_binary(value))
 
-      :list ->
-        quote(do: is_list(value))
+  defp shape_test(:list), do: quote(do: is_list(value))
 
-      :map ->
-        quote(do: is_map(value) and not is_map_key(value, :__struct__))
+  defp shape_test(:map), do: quote(do: is_map(value) and not is_map_key(value, :__struct__))
 
-      {:struct, module} ->
-        quote(do: is_struct(value, unquote(module)))
+  defp shape_test({:struct, module}), do: quote(do: is_struct(value, unquote(module)))
 
-      {:tuple, n, :any} ->
-        quote(do: is_tuple(value) and tuple_size(value) == unquote(n))
+  defp shape_test({:tuple, n, :any}),
+    do: quote(do: is_tuple(value) and tuple_size(value) == unquote(n))
 
-      {:tuple, n, t} ->
-        quote(
-          do:
-            is_tuple(value) and tuple_size(value) == unquote(n) and elem(value, 0) === unquote(t)
-        )
-    end
+  defp shape_test({:tuple, n, t}) do
+    quote(
+      do: is_tuple(value) and tuple_size(value) == unquote(n) and elem(value, 0) === unquote(t)
+    )
   end
 
   ## Embedding values and functions
@@ -1777,13 +1844,16 @@ defmodule Heddle.Compiler do
     Macro.escape(term)
   rescue
     ArgumentError ->
-      raise CodecError,
-        code: "H008",
-        summary:
-          "a compiled codec holds a value that cannot be embedded in code: #{inspect(term, limit: 5)}",
-        labels: [],
-        help:
-          "functions in compiled codecs must be written in the codec expression, or be external captures (&Mod.fun/1)"
+      reraise CodecError,
+              [
+                code: "H008",
+                summary:
+                  "a compiled codec holds a value that cannot be embedded in code: #{inspect(term, limit: 5)}",
+                labels: [],
+                help:
+                  "functions in compiled codecs must be written in the codec expression, or be external captures (&Mod.fun/1)"
+              ],
+              __STACKTRACE__
   end
 
   @doc false

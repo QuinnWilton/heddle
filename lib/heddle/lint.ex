@@ -22,78 +22,75 @@ defmodule Heddle.Lint do
     Enum.reverse(findings)
   end
 
-  defp walk(%Heddle{node: node} = codec, path, acc) do
-    case node do
-      {:binary, nil, _} ->
-        add(acc, codec, path, "binary has no max_size", "pass max_size: to Heddle.binary/1")
+  defp walk(%Heddle{node: {:binary, nil, _}} = codec, path, acc),
+    do: add(acc, codec, path, "binary has no max_size", "pass max_size: to Heddle.binary/1")
 
-      {:list, elem, max} ->
-        acc =
-          if max == nil,
-            do: add(acc, codec, path, "list has no max", "pass max: to the list codec"),
-            else: acc
+  defp walk(%Heddle{node: {:list, elem, max}} = codec, path, acc) do
+    acc =
+      if max == nil,
+        do: add(acc, codec, path, "list has no max", "pass max: to the list codec"),
+        else: acc
 
-        walk(elem, path ++ [:elements], acc)
-
-      {:map_of, key, value, max} ->
-        acc =
-          if max == nil,
-            do: add(acc, codec, path, "map_of has no max", "pass max: to Heddle.map_of/3"),
-            else: acc
-
-        acc = walk(key, path ++ [:keys], acc)
-        walk(value, path ++ [:values], acc)
-
-      {:integer, min, max} when min == nil or max == nil ->
-        add(
-          acc,
-          codec,
-          path,
-          "integer has no #{if min == nil, do: "min", else: "max"}, so bignums up to the VM's limit decode",
-          "pass min: and max: to Heddle.integer/1"
-        )
-
-      {:tuple, elems} ->
-        elems
-        |> Enum.with_index()
-        |> Enum.reduce(acc, fn {c, i}, acc -> walk(c, path ++ [i], acc) end)
-
-      {:map, required, optional} ->
-        Enum.reduce(required ++ optional, acc, fn {k, c}, acc -> walk(c, path ++ [k], acc) end)
-
-      {:struct, _, _, fields} ->
-        Enum.reduce(fields, acc, fn {k, c, _}, acc -> walk(c, path ++ [k], acc) end)
-
-      {:one_of, alts, _, _} ->
-        Enum.reduce(alts, acc, &walk(&1, path, &2))
-
-      {:iso, inner, _, _} ->
-        walk(inner, path, acc)
-
-      {:refine, inner, _, _} ->
-        walk(inner, path, acc)
-
-      {:from, inner, _} ->
-        walk(inner, path, acc)
-
-      {:lazy, thunk} ->
-        visit(acc, {:lazy, thunk}, fn acc -> walk(Heddle.IR.force(codec), path, acc) end)
-
-      {:ref, module, name} ->
-        visit(acc, {:ref, module, name}, fn acc ->
-          acc =
-            Enum.reduce(compiled_findings(module, name), acc, fn r, {f, s} -> {[r | f], s} end)
-
-          walk(Heddle.IR.ir_of_ref(module, name), path, acc)
-        end)
-
-      {:tuple_seq, _, seq} ->
-        walk_seq(seq, path, acc)
-
-      _ ->
-        acc
-    end
+    walk(elem, path ++ [:elements], acc)
   end
+
+  defp walk(%Heddle{node: {:map_of, key, value, max}} = codec, path, acc) do
+    acc =
+      if max == nil,
+        do: add(acc, codec, path, "map_of has no max", "pass max: to Heddle.map_of/3"),
+        else: acc
+
+    acc = walk(key, path ++ [:keys], acc)
+    walk(value, path ++ [:values], acc)
+  end
+
+  defp walk(%Heddle{node: {:integer, min, max}} = codec, path, acc)
+       when min == nil or max == nil do
+    add(
+      acc,
+      codec,
+      path,
+      "integer has no #{if min == nil, do: "min", else: "max"}, so bignums up to the VM's limit decode",
+      "pass min: and max: to Heddle.integer/1"
+    )
+  end
+
+  defp walk(%Heddle{node: {:tuple, elems}}, path, acc) do
+    elems
+    |> Enum.with_index()
+    |> Enum.reduce(acc, fn {c, i}, acc -> walk(c, path ++ [i], acc) end)
+  end
+
+  defp walk(%Heddle{node: {:map, required, optional}}, path, acc),
+    do: Enum.reduce(required ++ optional, acc, fn {k, c}, acc -> walk(c, path ++ [k], acc) end)
+
+  defp walk(%Heddle{node: {:struct, _, _, fields}}, path, acc),
+    do: Enum.reduce(fields, acc, fn {k, c, _}, acc -> walk(c, path ++ [k], acc) end)
+
+  defp walk(%Heddle{node: {:one_of, alts, _, _}}, path, acc),
+    do: Enum.reduce(alts, acc, &walk(&1, path, &2))
+
+  defp walk(%Heddle{node: {:iso, inner, _, _}}, path, acc), do: walk(inner, path, acc)
+
+  defp walk(%Heddle{node: {:refine, inner, _, _}}, path, acc), do: walk(inner, path, acc)
+
+  defp walk(%Heddle{node: {:from, inner, _}}, path, acc), do: walk(inner, path, acc)
+
+  defp walk(%Heddle{node: {:lazy, thunk}} = codec, path, acc),
+    do: visit(acc, {:lazy, thunk}, fn acc -> walk(Heddle.IR.force(codec), path, acc) end)
+
+  defp walk(%Heddle{node: {:ref, module, name}}, path, acc) do
+    visit(acc, {:ref, module, name}, fn acc ->
+      acc =
+        Enum.reduce(compiled_findings(module, name), acc, fn r, {f, s} -> {[r | f], s} end)
+
+      walk(Heddle.IR.ir_of_ref(module, name), path, acc)
+    end)
+  end
+
+  defp walk(%Heddle{node: {:tuple_seq, _, seq}}, path, acc), do: walk_seq(seq, path, acc)
+
+  defp walk(%Heddle{node: _}, _path, acc), do: acc
 
   # Only the first step of a sequence is static; the rest depends on values.
   defp walk_seq(%Heddle{node: {:bind, codec, _}}, path, acc), do: walk(codec, path ++ [0], acc)

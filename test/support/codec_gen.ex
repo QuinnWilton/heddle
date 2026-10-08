@@ -7,6 +7,8 @@ defmodule Heddle.Test.CodecGen do
 
   use ExUnitProperties
 
+  alias Heddle.Test.Fns
+
   @atoms [:a, :b, :c, :ok, :error, :nil_like, :"with space", :é, :日本]
 
   def codec_ast, do: codec_ast(3)
@@ -163,16 +165,14 @@ defmodule Heddle.Test.CodecGen do
 
   defp g_iso(depth) do
     StreamData.map(codec_ast(depth - 1), fn inner ->
-      quote(do: Heddle.iso(unquote(inner), &Heddle.Test.Fns.wrap/1, &Heddle.Test.Fns.unwrap/1))
+      quote(do: Heddle.iso(unquote(inner), &Fns.wrap/1, &Fns.unwrap/1))
     end)
   end
 
   defp g_refine do
     StreamData.member_of([
-      quote(
-        do: Heddle.refine(Heddle.integer(min: -100, max: 100), &Heddle.Test.Fns.even?/1, :even)
-      ),
-      quote(do: Heddle.refine(Heddle.binary(max_size: 8), &Heddle.Test.Fns.short?/1, :short))
+      quote(do: Heddle.refine(Heddle.integer(min: -100, max: 100), &Fns.even?/1, :even)),
+      quote(do: Heddle.refine(Heddle.binary(max_size: 8), &Fns.short?/1, :short))
     ])
   end
 

@@ -90,20 +90,17 @@ defmodule Heddle.Runtime do
   @spec check_count(
           non_neg_integer(),
           non_neg_integer() | nil,
-          non_neg_integer(),
-          integer(),
+          {non_neg_integer(), integer()},
           pos_integer(),
           integer(),
           [term()],
           binary(),
           lim()
-        ) ::
-          :ok | {:error, failure()}
+        ) :: :ok | {:error, failure()}
   def check_count(
         count,
         max,
-        min_bytes,
-        available,
+        {min_bytes, available},
         per_node,
         nodes,
         expected,
@@ -158,19 +155,17 @@ defmodule Heddle.Runtime do
   def run_decode(binary, limits, mode, decode) do
     total = byte_size(binary)
 
-    cond do
-      total > limits.max_bytes ->
-        {:error,
-         %DecodeError{
-           path: [],
-           offset: 0,
-           reason: :max_bytes,
-           expected: [{:max_bytes, limits.max_bytes}],
-           found: {:bytes, total}
-         }}
-
-      true ->
-        top(binary, total, limits, mode, decode)
+    if total > limits.max_bytes do
+      {:error,
+       %DecodeError{
+         path: [],
+         offset: 0,
+         reason: :max_bytes,
+         expected: [{:max_bytes, limits.max_bytes}],
+         found: {:bytes, total}
+       }}
+    else
+      top(binary, total, limits, mode, decode)
     end
   end
 

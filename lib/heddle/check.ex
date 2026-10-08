@@ -112,72 +112,71 @@ defmodule Heddle.Check do
 
   # Adds the plain form of defaulted struct fields the VM's term lacks,
   # walking the codec alongside the term.
-  defp with_defaults(%Heddle{node: node} = codec, term) do
-    case node do
-      {:list, elem, _} when is_list(term) ->
-        Enum.map(term, &with_defaults(elem, &1))
+  defp with_defaults(%Heddle{node: {:list, elem, _}}, term) when is_list(term),
+    do: Enum.map(term, &with_defaults(elem, &1))
 
-      {:tuple, elems} when is_tuple(term) ->
-        elems
-        |> Enum.zip(Tuple.to_list(term))
-        |> Enum.map(fn {c, t} -> with_defaults(c, t) end)
-        |> List.to_tuple()
+  defp with_defaults(%Heddle{node: {:tuple, elems}}, term) when is_tuple(term) do
+    elems
+    |> Enum.zip(Tuple.to_list(term))
+    |> Enum.map(fn {c, t} -> with_defaults(c, t) end)
+    |> List.to_tuple()
+  end
 
-      {:map, required, optional} when is_map(term) ->
-        Map.new(term, fn {k, v} ->
-          {k, with_defaults(Keyword.fetch!(required ++ optional, k), v)}
-        end)
+  defp with_defaults(%Heddle{node: {:map, required, optional}}, term) when is_map(term) do
+    Map.new(term, fn {k, v} ->
+      {k, with_defaults(Keyword.fetch!(required ++ optional, k), v)}
+    end)
+  end
 
-      {:map_of, _key, value, _} when is_map(term) ->
-        Map.new(term, fn {k, v} -> {k, with_defaults(value, v)} end)
+  defp with_defaults(%Heddle{node: {:map_of, _key, value, _}}, term) when is_map(term),
+    do: Map.new(term, fn {k, v} -> {k, with_defaults(value, v)} end)
 
-      {:struct, _module, :map, fields} when is_map(term) ->
-        Enum.reduce(fields, term, fn {name, c, default}, acc ->
-          case {acc, default} do
-            {%{^name => v}, _} -> Map.put(acc, name, with_defaults(c, v))
-            {_, {:ok, d}} -> Map.put(acc, name, plain(c, d))
-            {_, :none} -> acc
-          end
-        end)
+  defp with_defaults(%Heddle{node: {:struct, _module, :map, fields}}, term) when is_map(term) do
+    Enum.reduce(fields, term, fn {name, c, default}, acc ->
+      case {acc, default} do
+        {%{^name => v}, _} -> Map.put(acc, name, with_defaults(c, v))
+        {_, {:ok, d}} -> Map.put(acc, name, plain(c, d))
+        {_, :none} -> acc
+      end
+    end)
+  end
 
-      {:struct, _module, {:tuple, tag}, fields} when is_tuple(term) ->
-        codecs = Enum.map(fields, &elem(&1, 1))
-        codecs = if tag, do: [Heddle.atom(tag) | codecs], else: codecs
-        with_defaults(%Heddle{node: {:tuple, codecs}}, term)
+  defp with_defaults(%Heddle{node: {:struct, _module, {:tuple, tag}, fields}}, term)
+       when is_tuple(term) do
+    codecs = Enum.map(fields, &elem(&1, 1))
+    codecs = if tag, do: [Heddle.atom(tag) | codecs], else: codecs
+    with_defaults(%Heddle{node: {:tuple, codecs}}, term)
+  end
 
-      {:one_of, alts, firsts, _} ->
-        <<131, bytes::binary>> = :erlang.term_to_binary(term)
-        class = ETF.classify(bytes)
+  defp with_defaults(%Heddle{node: {:one_of, alts, firsts, _}}, term) do
+    <<131, bytes::binary>> = :erlang.term_to_binary(term)
+    class = ETF.classify(bytes)
 
-        case IR.choose(firsts, &IR.first_matches?(&1, class)) do
-          nil -> term
-          index -> with_defaults(Enum.at(alts, index), term)
-        end
-
-      {:iso, inner, _, _} ->
-        with_defaults(inner, term)
-
-      {:refine, inner, _, _} ->
-        with_defaults(inner, term)
-
-      {:from, inner, _} ->
-        with_defaults(inner, term)
-
-      {:lazy, _} ->
-        with_defaults(IR.force(codec), term)
-
-      {:ref, module, name} ->
-        with_defaults(IR.ir_of_ref(module, name), term)
-
-      {:tuple_seq, tag, seq} when is_tuple(term) ->
-        elems = Tuple.to_list(term)
-        {prefix, elems} = if tag, do: Enum.split(elems, 1), else: {[], elems}
-        prefix |> Enum.concat(seq_defaults(seq, elems)) |> List.to_tuple()
-
-      _ ->
-        term
+    case IR.choose(firsts, &IR.first_matches?(&1, class)) do
+      nil -> term
+      index -> with_defaults(Enum.at(alts, index), term)
     end
   end
+
+  defp with_defaults(%Heddle{node: {:iso, inner, _, _}}, term), do: with_defaults(inner, term)
+
+  defp with_defaults(%Heddle{node: {:refine, inner, _, _}}, term), do: with_defaults(inner, term)
+
+  defp with_defaults(%Heddle{node: {:from, inner, _}}, term), do: with_defaults(inner, term)
+
+  defp with_defaults(%Heddle{node: {:lazy, _}} = codec, term),
+    do: with_defaults(IR.force(codec), term)
+
+  defp with_defaults(%Heddle{node: {:ref, module, name}}, term),
+    do: with_defaults(IR.ir_of_ref(module, name), term)
+
+  defp with_defaults(%Heddle{node: {:tuple_seq, tag, seq}}, term) when is_tuple(term) do
+    elems = Tuple.to_list(term)
+    {prefix, elems} = if tag, do: Enum.split(elems, 1), else: {[], elems}
+    prefix |> Enum.concat(seq_defaults(seq, elems)) |> List.to_tuple()
+  end
+
+  defp with_defaults(%Heddle{node: _}, term), do: term
 
   defp seq_defaults(%Heddle{node: {:bind, codec, continuation}}, [term | rest]) do
     {:ok, value} =

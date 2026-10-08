@@ -78,6 +78,7 @@ defmodule Heddle.Diagnostics do
   end
 
   @doc false
+  @spec compile_error!(Heddle.CodecError.t(), Macro.Env.t()) :: no_return()
   @spec compile_error!(Heddle.CodecError.t(), Macro.Env.t(), keyword()) :: no_return()
   def compile_error!(error, env, opts \\ []) do
     report = report(error, env, opts)

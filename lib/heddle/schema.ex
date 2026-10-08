@@ -426,35 +426,81 @@ defmodule Heddle.Schema do
     codecs = env.module |> Module.get_attribute(:heddle_codecs) |> Enum.reverse()
     names = Enum.map(codecs, &elem(&1, 0))
 
-    dec_clauses =
-      for name <- names do
-        quote do
-          def __heddle_decode__(unquote(name), rest, depth, nodes, lim),
-            do: unquote(Compiler.root_dec(name))(rest, depth, nodes, lim)
-        end
-      end
+    quote do
+      @doc false
+      unquote_splicing(decode_clauses(names))
+      @doc false
+      unquote_splicing(encode_clauses(names))
+      @doc false
+      unquote_splicing(summary_clauses(codecs))
+      @doc false
+      unquote_splicing(lint_clauses(codecs))
+      @doc false
+      unquote_splicing(ir_clauses(names))
+      @doc false
+      def __heddle_codecs__, do: unquote(names)
+    end
+  end
 
-    enc_clauses =
-      for name <- names do
+  defp missing(function, args) do
+    quote do
+      def unquote(function)(name, unquote_splicing(args)),
+        do:
+          raise(
+            ArgumentError,
+            "#{inspect(__MODULE__)} has no Heddle codec named #{inspect(name)}"
+          )
+    end
+  end
+
+  defp decode_clauses(names) do
+    for(name <- names) do
+      quote do
+        def __heddle_decode__(unquote(name), rest, depth, nodes, lim),
+          do: unquote(Compiler.root_dec(name))(rest, depth, nodes, lim)
+      end
+    end ++
+      [
+        missing(
+          :__heddle_decode__,
+          Enum.map(~w(rest depth nodes lim)a, &Macro.var(:"_#{&1}", __MODULE__))
+        )
+      ]
+  end
+
+  defp encode_clauses(names) do
+    for(
+      name <- names,
+      do:
         quote(
           do:
             def(__heddle_encode__(unquote(name), value),
               do: unquote(Compiler.root_enc(name))(value)
             )
         )
-      end
+    ) ++
+      [missing(:__heddle_encode__, [Macro.var(:_value, __MODULE__)])]
+  end
 
-    summary_clauses =
-      for {name, summary, _} <- codecs do
-        quote(do: def(__heddle_summary__(unquote(name)), do: unquote(Macro.escape(summary))))
-      end
+  defp summary_clauses(codecs) do
+    for(
+      {name, summary, _} <- codecs,
+      do: quote(do: def(__heddle_summary__(unquote(name)), do: unquote(Macro.escape(summary))))
+    ) ++
+      [missing(:__heddle_summary__, [])]
+  end
 
-    lint_clauses =
-      for {name, _, findings} <- codecs do
-        quote(do: def(__heddle_lint__(unquote(name)), do: unquote(Macro.escape(findings))))
-      end
+  defp lint_clauses(codecs) do
+    for(
+      {name, _, findings} <- codecs,
+      do: quote(do: def(__heddle_lint__(unquote(name)), do: unquote(Macro.escape(findings))))
+    ) ++
+      [quote(do: def(__heddle_lint__(_name), do: []))]
+  end
 
-    ir_clauses =
+  # The IR is rebuilt once per node and kept in :persistent_term.
+  defp ir_clauses(names) do
+    clauses =
       for name <- names do
         quote do
           def __heddle_ir__(unquote(name)) do
@@ -473,53 +519,6 @@ defmodule Heddle.Schema do
         end
       end
 
-    quote do
-      @doc false
-      unquote_splicing(dec_clauses)
-
-      def __heddle_decode__(name, _rest, _depth, _nodes, _lim),
-        do:
-          raise(
-            ArgumentError,
-            "#{inspect(__MODULE__)} has no Heddle codec named #{inspect(name)}"
-          )
-
-      @doc false
-      unquote_splicing(enc_clauses)
-
-      def __heddle_encode__(name, _value),
-        do:
-          raise(
-            ArgumentError,
-            "#{inspect(__MODULE__)} has no Heddle codec named #{inspect(name)}"
-          )
-
-      @doc false
-      unquote_splicing(summary_clauses)
-
-      def __heddle_summary__(name),
-        do:
-          raise(
-            ArgumentError,
-            "#{inspect(__MODULE__)} has no Heddle codec named #{inspect(name)}"
-          )
-
-      @doc false
-      unquote_splicing(lint_clauses)
-      def __heddle_lint__(_name), do: []
-
-      @doc false
-      unquote_splicing(ir_clauses)
-
-      def __heddle_ir__(name),
-        do:
-          raise(
-            ArgumentError,
-            "#{inspect(__MODULE__)} has no Heddle codec named #{inspect(name)}"
-          )
-
-      @doc false
-      def __heddle_codecs__, do: unquote(names)
-    end
+    clauses ++ [missing(:__heddle_ir__, [])]
   end
 end

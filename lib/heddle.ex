@@ -41,8 +41,13 @@ defmodule Heddle do
   @enforce_keys [:node]
   defstruct [:node, span: nil]
 
-  @typedoc "A codec that encodes an `i` and decodes to an `o`."
-  @opaque t(_i, _o) :: %__MODULE__{node: term(), span: term()}
+  @typedoc """
+  A codec that encodes an `i` and decodes to an `o`.
+
+  Treat it as opaque: its fields are Heddle's internal representation,
+  which Heddle's own modules share, and they change between versions.
+  """
+  @type t(_i, _o) :: %__MODULE__{node: term(), span: term()}
 
   @typedoc "An aligned codec: it encodes and decodes the same type."
   @type t(a) :: t(a, a)
