@@ -93,7 +93,7 @@ defmodule Heddle.ETF do
   defp utf8_name(rest, len) do
     case rest do
       <<name::binary-size(^len), rest::binary>> ->
-        if String.valid?(name) and codepoints(name) <= @max_atom_chars,
+        if Heddle.SWAR.utf8?(name) and codepoints(name) <= @max_atom_chars,
           do: {:ok, name, rest},
           else: {:error, :invalid_atom}
 
@@ -129,7 +129,7 @@ defmodule Heddle.ETF do
   """
   @spec valid_atom_name?(term()) :: boolean()
   def valid_atom_name?(name) when is_binary(name),
-    do: String.valid?(name) and codepoints(name) <= @max_atom_chars
+    do: Heddle.SWAR.utf8?(name) and codepoints(name) <= @max_atom_chars
 
   def valid_atom_name?(_), do: false
 
