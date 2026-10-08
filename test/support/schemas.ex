@@ -125,3 +125,57 @@ defmodule Heddle.Test.File do
     field(:parent, Heddle.one_of([Heddle.null(), Heddle.Test.Folder]))
   end
 end
+
+defmodule Heddle.Test.Producers do
+  @moduledoc false
+  # Codecs for the producer corpus in test/fixtures/generate.escript.
+  use Heddle.Schema
+
+  defcodec session do
+    Heddle.Test.Session
+  end
+
+  defcodec commands do
+    Heddle.list(Heddle.Test.Command, max: 10)
+  end
+
+  defcodec integers do
+    Heddle.list(Heddle.integer(), max: 10)
+  end
+
+  defcodec floats do
+    Heddle.list(Heddle.float(), max: 10)
+  end
+
+  defcodec atoms do
+    Heddle.list(Heddle.enum([:é, :ok, :ünïcode, :日本]), max: 10)
+  end
+
+  defcodec charlists do
+    Heddle.list(Heddle.charlist(max: 10), max: 10)
+  end
+
+  defcodec binaries do
+    Heddle.list(Heddle.binary(max_size: 1000, utf8: true), max: 10)
+  end
+
+  defcodec nested do
+    Heddle.tuple([
+      Heddle.atom(:tag),
+      Heddle.list(
+        Heddle.one_of([Heddle.tagged(:a, Heddle.integer()), Heddle.tagged(:b, Heddle.binary())]),
+        max: 4
+      ),
+      Heddle.map([]),
+      Heddle.tuple([])
+    ])
+  end
+
+  defcodec bigmap do
+    Heddle.map_of(Heddle.integer(min: 0), Heddle.integer(min: 0), max: 64)
+  end
+
+  defcodec unknown do
+    Heddle.list(Heddle.enum([:http, :https], unknown: :keep), max: 10)
+  end
+end
