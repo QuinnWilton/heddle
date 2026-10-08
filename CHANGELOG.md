@@ -13,3 +13,9 @@
 - `Heddle.Interpreter`, the reference semantics.
 - `Heddle.Gen`, `Heddle.Laws` and `Heddle.Check` for property and
   differential testing; `Heddle.Lint` for unbounded positions.
+- Compiled codecs: `Heddle.Schema` (`defcodec`, `defschema`, `defunion`),
+  `@derive Heddle.Codec`, and `Heddle.Syntax` blocks compile to binary
+  pattern matches at build time, with binding-time analysis of `bind`
+  (finite, parameter and opaque binds) and pentiment diagnostics for every
+  static check.
+- SWAR scans for UTF-8 validation and STRING_EXT byte ranges.

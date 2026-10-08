@@ -413,17 +413,22 @@ defmodule HeddleTest do
       assert %DecodeError{reason: :version, found: :eof} = error(any, <<>>)
     end
 
+    # Other tests create atoms concurrently, so this checks the names
+    # themselves rather than the global atom count.
     test "decoding never creates atoms" do
-      before = :erlang.system_info(:atom_count)
+      names = for i <- 1..50, do: "heddle_fresh_#{i}_#{System.unique_integer([:positive])}"
 
-      for i <- 1..50 do
-        name = "heddle_fresh_#{i}_#{System.unique_integer([:positive])}"
+      for name <- names do
         bin = <<131, 119, byte_size(name), name::binary>>
-        Heddle.decode(Heddle.enum([], unknown: :keep), bin)
-        Heddle.decode(Heddle.existing_atom(), bin)
+        assert {:ok, {:unknown, ^name}} = Heddle.decode(Heddle.enum([], unknown: :keep), bin)
+
+        assert {:error, %DecodeError{reason: :unknown_atom}} =
+                 Heddle.decode(Heddle.existing_atom(), bin)
       end
 
-      assert :erlang.system_info(:atom_count) == before
+      for name <- names do
+        assert_raise ArgumentError, fn -> String.to_existing_atom(name) end
+      end
     end
   end
 

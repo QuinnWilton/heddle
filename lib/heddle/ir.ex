@@ -64,20 +64,31 @@ defmodule Heddle.IR do
   defmodule FunRef do
     @moduledoc false
     # A function inside a codec expression a macro evaluates at compile time.
-    # `ast` is the function's source, which compiled code embeds.
-    @enforce_keys [:id, :ast, :arity]
-    defstruct [:id, :ast, :arity]
-    @type t :: %__MODULE__{id: pos_integer(), ast: Macro.t(), arity: non_neg_integer()}
+    # The compiler keeps the function's source under `id`; `bindings` are the
+    # variables in scope where the function was created, so its source can
+    # be evaluated or embedded later.
+    @enforce_keys [:id, :arity]
+    defstruct [:id, :arity, bindings: []]
+
+    @type t :: %__MODULE__{
+            id: pos_integer(),
+            arity: non_neg_integer(),
+            bindings: [{{atom(), atom()}, term()}]
+          }
+
+    @doc false
+    @spec new(pos_integer(), non_neg_integer(), [{{atom(), atom()}, term()}]) :: t()
+    def new(id, arity, bindings), do: %__MODULE__{id: id, arity: arity, bindings: bindings}
   end
 
   defmodule Param do
     @moduledoc false
-    # A bound value standing in a codec parameter (a size or a range bound)
-    # while the compiler classifies a dependent bind. `var` is the variable's
-    # AST; `min` and `max` are its static range, when known.
-    @enforce_keys [:var]
-    defstruct [:var, :min, :max]
-    @type t :: %__MODULE__{var: Macro.t(), min: integer() | nil, max: integer() | nil}
+    # A value decoded earlier in a sequence, standing in a codec parameter (a
+    # size or a range bound) while the compiler compiles a dependent bind.
+    # `index` is its position in the parameter tuple compiled code passes.
+    @enforce_keys [:index]
+    defstruct [:index]
+    @type t :: %__MODULE__{index: non_neg_integer()}
   end
 
   @type first_item ::
@@ -226,8 +237,10 @@ defmodule Heddle.IR do
     end
   end
 
+  # Waits for a module still compiling: a summary is needed now.
   defp remote_summary(module, name) do
-    if Code.ensure_loaded?(module) and function_exported?(module, :__heddle_summary__, 1) do
+    if match?({:module, _}, Code.ensure_compiled(module)) and
+         function_exported?(module, :__heddle_summary__, 1) do
       module.__heddle_summary__(name)
     else
       raise CodecError,
@@ -504,27 +517,31 @@ defmodule Heddle.IR do
       [] ->
         :ok
 
-      [{x, y} | _] ->
-        {what, help} = overlap_text(direction, x, y)
+      [{_x, y} | _] ->
+        {what, help} = overlap_text(direction)
 
         raise CodecError,
           code: code,
           summary: "one_of alternatives overlap: #{what}",
           labels: [
             {b, "this alternative #{describe_item(direction, y)}"},
-            {a, "this earlier alternative also #{describe_item(direction, x)}"}
+            {a,
+             if(direction == "decode",
+               do: "so can this earlier one",
+               else: "so does this earlier one"
+             )}
           ],
           help: help
     end
   end
 
-  defp overlap_text("decode", _, _) do
+  defp overlap_text("decode") do
     {"the decoder cannot tell them apart by their first bytes",
      "give each alternative a distinct tag (an atom literal or a tagged tuple), " <>
        "or a different term type"}
   end
 
-  defp overlap_text("encode", _, _) do
+  defp overlap_text("encode") do
     {"the encoder cannot tell their values apart",
      "make the alternatives' values distinguishable: different literals, tuple tags, " <>
        "types or integer ranges"}
@@ -541,6 +558,7 @@ defmodule Heddle.IR do
   defp inspect_item({:struct, m}), do: "%#{inspect(m)}{}"
   defp inspect_item({:tuple, n, :any}), do: "tuples of arity #{arity(n)}"
   defp inspect_item({:tuple, n, t}), do: "tuples of arity #{arity(n)} tagged #{inspect(t)}"
+  defp inspect_item(:integer), do: "an integer"
   defp inspect_item(class), do: "a #{class}"
 
   defp bound(nil), do: "∞"
@@ -561,6 +579,11 @@ defmodule Heddle.IR do
 
     :ok
   end
+
+  @doc false
+  @spec __at__(term(), term()) :: term()
+  def __at__(%Heddle{span: nil} = codec, span), do: %{codec | span: span}
+  def __at__(other, _span), do: other
 
   @doc false
   @spec span_text(Heddle.t()) :: String.t()

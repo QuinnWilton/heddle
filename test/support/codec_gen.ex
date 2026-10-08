@@ -45,7 +45,7 @@ defmodule Heddle.Test.CodecGen do
 
   defp g_enum do
     gen all atoms <-
-              StreamData.uniq_list_of(StreamData.member_of(@atoms), min_length: 1, max_length: 4),
+              uniq(StreamData.member_of(@atoms), 4),
             unknown <- StreamData.member_of([:reject, :keep]) do
       quote(do: Heddle.enum(unquote(atoms), unknown: unquote(unknown)))
     end
@@ -84,9 +84,7 @@ defmodule Heddle.Test.CodecGen do
 
   defp g_map(depth) do
     gen all keys <-
-              StreamData.uniq_list_of(StreamData.member_of([:k1, :k2, :k3, :"k é"]),
-                max_length: 3
-              ),
+              uniq(StreamData.member_of([:k1, :k2, :k3, :"k é"]), 3, 0),
             codecs <- StreamData.list_of(codec_ast(depth - 1), length: length(keys)),
             kinds <- StreamData.list_of(StreamData.boolean(), length: length(keys)) do
       pairs = Enum.zip([keys, codecs, kinds])
@@ -131,10 +129,7 @@ defmodule Heddle.Test.CodecGen do
     ]
 
     gen all picked <-
-              StreamData.uniq_list_of(StreamData.member_of(Keyword.keys(kinds)),
-                min_length: 1,
-                max_length: 4
-              ),
+              uniq(StreamData.member_of(Keyword.keys(kinds)), 4),
             alts <- picked |> Enum.map(&Keyword.fetch!(kinds, &1)) |> StreamData.fixed_list() do
       quote(do: Heddle.one_of(unquote(alts)))
     end
@@ -214,6 +209,13 @@ defmodule Heddle.Test.CodecGen do
         )
       end
     ])
+  end
+
+  # Distinct elements without uniq_list_of, which gives up on small spaces.
+  defp uniq(gen, max, min \\ 1) do
+    gen
+    |> StreamData.list_of(min_length: min, max_length: max)
+    |> StreamData.map(&Enum.uniq/1)
   end
 
   @doc "A generator of `{ast, codec}` pairs."
