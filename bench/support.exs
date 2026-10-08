@@ -1,11 +1,5 @@
-# Compiled codecs against :erlang.binary_to_term/2 and :erlang.term_to_binary/1.
-#
-#     mix run bench/codecs.exs
-#
-# binary_to_term/2 builds an untyped term without validating it; Heddle
-# validates every byte against the codec, enforces limits and builds the
-# structs. The interpreter runs the same codecs without compilation, for
-# reference.
+# Codecs for the benchmarks in this directory; bench/cases.exs builds the
+# payloads they encode and decode.
 
 defmodule Bench.User do
   @derive {Heddle.Codec,

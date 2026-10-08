@@ -19,3 +19,6 @@
   (finite, parameter and opaque binds) and pentiment diagnostics for every
   static check.
 - SWAR scans for UTF-8 validation and STRING_EXT byte ranges.
+- Faster compiled codecs: decoding within 1.1-1.5x of `binary_to_term/2` and
+  encoding at or below `term_to_binary/1` for struct, union and list
+  payloads (`bench/ratios.exs`).

@@ -54,8 +54,20 @@ defmodule Heddle.Compiler do
       root_dec = root_dec(name)
       root_enc = root_enc(name)
 
+      # The root's body is a call to the top node's function; inlining it
+      # saves a call on every decode and on every reference from elsewhere.
+      inline =
+        case {dec, enc} do
+          {{:local, d, false}, {:local, e, false}} -> [{d, 4}, {e, 2}]
+          {{:local, d, false}, _} -> [{d, 4}]
+          {_, {:local, e, false}} -> [{e, 2}]
+          _ -> []
+        end
+
       roots =
         quote do
+          @compile {:inline, unquote(inline)}
+
           @doc false
           def unquote(root_dec)(rest, depth, nodes, lim), do: unquote(invoke_dec(dec, nil))
 
@@ -263,8 +275,13 @@ defmodule Heddle.Compiler do
   end
 
   # A decoder that does not consume a term itself (a choice or a wrapper).
-  defp wrapper(pctx, body) do
+  defp wrapper(pctx, body, fast \\ []) do
     name = fresh(:d)
+
+    Enum.each(fast, fn {args, guard, fast_body} ->
+      add_def(defp_ast(name, args, guard, fast_body))
+    end)
+
     add_def(defp_ast(name, args(pctx), nil, body))
     {:local, name, pctx != nil}
   end
@@ -605,6 +622,19 @@ defmodule Heddle.Compiler do
 
   defp fused_tuple(_elems, _pctx, _build), do: []
 
+  defp fused_alternative(%Heddle{node: {:tuple, elems}}),
+    do: fused_tuple(elems, nil, fn values -> {:{}, [], values} end)
+
+  defp fused_alternative(%Heddle{node: {:literal, atom}}) do
+    for spelling <- ETF.atom_spellings(atom) do
+      {[pattern(spelling, quote(do: rest)), quote(do: depth), quote(do: nodes), quote(do: lim)],
+       quote(do: depth <= elem(lim, 0) and nodes > 0),
+       quote(do: {:ok, unquote(atom), rest, nodes - 1})}
+    end
+  end
+
+  defp fused_alternative(_codec), do: []
+
   defp inline_leaf_for_atom(atom), do: inline_leaf(%Heddle{node: {:literal, atom}})
 
   defp copy_from_lim(value) do
@@ -625,6 +655,86 @@ defmodule Heddle.Compiler do
     case Process.get({:heddle_struct_info, module}) do
       nil -> Macro.struct_info!(module, st().env)
       info -> info
+    end
+  end
+
+  # A key followed by a leaf value matches in one pattern: the key's and
+  # the value's limit checks, the duplicate check and the value's fast path
+  # are all guards, so the binary stays a match context.
+  defp define_fused_struct(loop, entries, bits, handlers) do
+    for {key, codec} <- entries,
+        spelling <- ETF.atom_spellings(key),
+        {segments, guard, value, check} <- fused_leaf(codec) do
+      bit = Map.fetch!(bits, key)
+
+      update =
+        if key == :__struct__,
+          do: quote(do: acc),
+          else: quote(do: %{acc | unquote(key) => unquote(value)})
+
+      head = {:<<>>, [], :binary.bin_to_list(spelling) ++ segments}
+
+      continue =
+        quote do
+          unquote(loop)(
+            rest,
+            n - 1,
+            depth,
+            nodes - 2,
+            lim,
+            Bitwise.bor(seen, unquote(bit)),
+            unquote(update)
+          )
+        end
+
+      # A value whose fast path needs a check guards cannot express (UTF-8)
+      # falls back to the key's handler when the check fails.
+      body =
+        case check do
+          nil ->
+            continue
+
+          check ->
+            quote do
+              if unquote(check) do
+                unquote(continue)
+              else
+                <<_::binary-size(unquote(byte_size(spelling))), after_key::binary>> = whole
+
+                unquote(Map.fetch!(handlers, key))(
+                  whole,
+                  after_key,
+                  n,
+                  depth,
+                  nodes - 1,
+                  lim,
+                  seen,
+                  acc
+                )
+              end
+            end
+        end
+
+      add_def(
+        defp_ast(
+          loop,
+          [
+            if(check, do: quote(do: unquote(head) = whole), else: head),
+            quote(do: n),
+            quote(do: depth),
+            quote(do: nodes),
+            quote(do: lim),
+            quote(do: seen),
+            quote(do: acc)
+          ],
+          quote do
+            n > 0 and nodes >= 2 and depth <= elem(lim, 0) and
+              Bitwise.band(seen, unquote(bit)) == 0 and
+              unquote(guard)
+          end,
+          body
+        )
+      )
     end
   end
 
@@ -764,82 +874,7 @@ defmodule Heddle.Compiler do
     # the value's limit checks, the duplicate check and the value's fast
     # path are all guards, so the binary stays a match context. Anything
     # else falls to the general clause below.
-    if pctx == nil do
-      for {key, codec} <- entries,
-          spelling <- ETF.atom_spellings(key),
-          {segments, guard, value, check} <- fused_leaf(codec) do
-        bit = Map.fetch!(bits, key)
-
-        update =
-          if key == :__struct__,
-            do: quote(do: acc),
-            else: quote(do: %{acc | unquote(key) => unquote(value)})
-
-        head = {:<<>>, [], :binary.bin_to_list(spelling) ++ segments}
-
-        continue =
-          quote do
-            unquote(loop)(
-              rest,
-              n - 1,
-              depth,
-              nodes - 2,
-              lim,
-              Bitwise.bor(seen, unquote(bit)),
-              unquote(update)
-            )
-          end
-
-        # A value whose fast path needs a check guards cannot express (UTF-8)
-        # falls back to the key's handler when the check fails.
-        body =
-          case check do
-            nil ->
-              continue
-
-            check ->
-              quote do
-                if unquote(check) do
-                  unquote(continue)
-                else
-                  <<_::binary-size(unquote(byte_size(spelling))), after_key::binary>> = whole
-
-                  unquote(Map.fetch!(handlers, key))(
-                    whole,
-                    after_key,
-                    n,
-                    depth,
-                    nodes - 1,
-                    lim,
-                    seen,
-                    acc
-                  )
-                end
-              end
-          end
-
-        add_def(
-          defp_ast(
-            loop,
-            [
-              if(check, do: quote(do: unquote(head) = whole), else: head),
-              quote(do: n),
-              quote(do: depth),
-              quote(do: nodes),
-              quote(do: lim),
-              quote(do: seen),
-              quote(do: acc)
-            ],
-            quote do
-              n > 0 and nodes >= 2 and depth <= elem(lim, 0) and
-                Bitwise.band(seen, unquote(bit)) == 0 and
-                unquote(guard)
-            end,
-            body
-          )
-        )
-      end
-    end
+    if pctx == nil, do: define_fused_struct(loop, entries, bits, handlers)
 
     # The finishing clause comes after the fused ones, so they keep the
     # binary a match context.
@@ -1635,61 +1670,7 @@ defmodule Heddle.Compiler do
 
     # A leaf key followed by a leaf value matches in one pattern, with every
     # check as a guard; anything else goes through the pair function.
-    if pctx == nil do
-      for {kseg, kguard, kvalue, nil} <- fused_leaf(key),
-          {vseg, vguard, vvalue, nil} <- fused_leaf(value) do
-        kseg = kseg |> Enum.drop(-1) |> rename_vars(%{x: :k, len: :klen})
-        vseg = rename_vars(vseg, %{x: :v, len: :vlen})
-
-        {kguard, kvalue} =
-          {rename_vars(kguard, %{x: :k, len: :klen}), rename_vars(kvalue, %{x: :k, len: :klen})}
-
-        {vguard, vvalue} =
-          {rename_vars(vguard, %{x: :v, len: :vlen}), rename_vars(vvalue, %{x: :v, len: :vlen})}
-
-        key_value = Macro.var(:key, __MODULE__)
-
-        # The checks compare the key's bytes, before any copy.
-        guard_key =
-          Macro.prewalk(kvalue, fn
-            {:if, _, [_, [do: _, else: raw]]} -> raw
-            node -> node
-          end)
-
-        add_def(
-          defp_ast(
-            loop,
-            [
-              {:<<>>, [], kseg ++ vseg},
-              quote(do: n),
-              quote(do: i),
-              quote(do: depth),
-              quote(do: nodes),
-              quote(do: lim),
-              quote(do: acc)
-            ],
-            quote do
-              n > 0 and nodes >= 2 and depth <= elem(lim, 0) and unquote(kguard) and
-                unquote(vguard) and
-                unquote(guard_key) != :__struct__ and not is_map_key(acc, unquote(guard_key))
-            end,
-            quote do
-              unquote(key_value) = unquote(kvalue)
-
-              unquote(loop)(
-                rest,
-                n - 1,
-                i + 1,
-                depth,
-                nodes - 2,
-                lim,
-                Map.put(acc, unquote(key_value), unquote(vvalue))
-              )
-            end
-          )
-        )
-      end
-    end
+    if pctx == nil, do: define_fused_map_of(loop, pair, key, value)
 
     add_def(
       defp_ast(
@@ -1759,6 +1740,89 @@ defmodule Heddle.Compiler do
     )
   end
 
+  # A leaf key followed by a leaf value matches in one pattern, with every
+  # check as a guard; anything else goes through the pair function.
+  defp define_fused_map_of(loop, pair, key, value) do
+    for {kseg, kguard, kvalue, kcheck} <- fused_leaf(key),
+        {vseg, vguard, vvalue, vcheck} <- fused_leaf(value) do
+      renames_k = %{x: :k, len: :klen}
+      renames_v = %{x: :v, len: :vlen}
+      kseg = kseg |> Enum.drop(-1) |> rename_vars(renames_k)
+      vseg = rename_vars(vseg, renames_v)
+      {kguard, kvalue} = {rename_vars(kguard, renames_k), rename_vars(kvalue, renames_k)}
+      {vguard, vvalue} = {rename_vars(vguard, renames_v), rename_vars(vvalue, renames_v)}
+
+      checks =
+        Enum.reject(
+          [kcheck && rename_vars(kcheck, renames_k), vcheck && rename_vars(vcheck, renames_v)],
+          &is_nil/1
+        )
+
+      key_value = Macro.var(:key, __MODULE__)
+
+      # The checks compare the key's bytes, before any copy.
+      guard_key =
+        Macro.prewalk(kvalue, fn
+          {:if, _, [_, [do: _, else: raw]]} -> raw
+          node -> node
+        end)
+
+      continue =
+        quote do
+          unquote(key_value) = unquote(kvalue)
+
+          unquote(loop)(
+            rest,
+            n - 1,
+            i + 1,
+            depth,
+            nodes - 2,
+            lim,
+            Map.put(acc, unquote(key_value), unquote(vvalue))
+          )
+        end
+
+      # Checks guards cannot express (UTF-8) run in the body; when one
+      # fails, the pair goes through the pair function from its start.
+      {head, body} =
+        case checks do
+          [] ->
+            {{:<<>>, [], kseg ++ vseg}, continue}
+
+          _ ->
+            check = Enum.reduce(checks, &quote(do: unquote(&2) and unquote(&1)))
+
+            {quote(do: unquote({:<<>>, [], kseg ++ vseg}) = whole),
+             quote do
+               if unquote(check),
+                 do: unquote(continue),
+                 else: unquote(pair)(whole, n, i, depth, nodes, lim, acc)
+             end}
+        end
+
+      add_def(
+        defp_ast(
+          loop,
+          [
+            head,
+            quote(do: n),
+            quote(do: i),
+            quote(do: depth),
+            quote(do: nodes),
+            quote(do: lim),
+            quote(do: acc)
+          ],
+          quote do
+            n > 0 and nodes >= 2 and depth <= elem(lim, 0) and unquote(kguard) and
+              unquote(vguard) and
+              unquote(guard_key) != :__struct__ and not is_map_key(acc, unquote(guard_key))
+          end,
+          body
+        )
+      )
+    end
+  end
+
   defp rename_vars(ast, renames) do
     Macro.prewalk(ast, fn
       {name, meta, ctx} = var when is_atom(name) and is_atom(ctx) ->
@@ -1786,7 +1850,13 @@ defmodule Heddle.Compiler do
       {:->, [],
        [[quote(do: _)], quote(do: Heddle.Runtime.fail(:unexpected, unquote(expected), rest))]}
 
-    wrapper(pctx, {:case, [], [quote(do: rest), [do: clauses ++ [fallback]]]})
+    # Alternatives that are a literal or a tuple of leaves also match here in
+    # one clause each. FIRST sets are disjoint, so such a clause only fires
+    # for the alternative the dispatch below would pick, and it is that
+    # alternative's own fast path.
+    fast = if pctx == nil, do: Enum.flat_map(alts, &fused_alternative/1), else: []
+
+    wrapper(pctx, {:case, [], [quote(do: rest), [do: clauses ++ [fallback]]]}, fast)
   end
 
   # Byte patterns equivalent to IR.first_matches?/2 over ETF.classify/1.
@@ -1939,54 +2009,7 @@ defmodule Heddle.Compiler do
     # since the list is a STRING_EXT exactly when all of them do.
     small? = small_capable?(elem)
     define_list_encoder(loop, elem, elem_caller, small?, extra)
-
-    body =
-      if small? do
-        quote do
-          case unquote(loop)(value, 0, <<>>, :same, value, true, unquote_splicing(extra)) do
-            {:ok, y, out, true} when n < 65_536 ->
-              {:ok, y, <<acc::binary, 107, n::16, Heddle.Runtime.untag_small(out)::binary>>}
-
-            {:ok, y, out, _small} ->
-              {:ok, y, <<acc::binary, 108, n::32, out::binary, 106>>}
-
-            error ->
-              error
-          end
-        end
-      else
-        quote do
-          case unquote(loop)(
-                 value,
-                 0,
-                 <<acc::binary, 108, n::32>>,
-                 :same,
-                 value,
-                 false,
-                 unquote_splicing(extra)
-               ) do
-            {:ok, y, out, _small} -> {:ok, y, <<out::binary, 106>>}
-            error -> error
-          end
-        end
-      end
-
-    max_check =
-      if max == nil,
-        do: false,
-        else: quote(do: n > unquote(max_ast))
-
-    fast =
-      case {pctx, string_elements(elem)} do
-        {nil, :all} ->
-          [{quote(do: value), nil, string_encode(0, 255, max, quote(do: unquote(loop)))}]
-
-        {nil, {:range, lo, hi}} ->
-          [{quote(do: value), nil, string_encode(lo, hi, max, quote(do: unquote(loop)))}]
-
-        _ ->
-          []
-      end
+    max_check = if max == nil, do: false, else: quote(do: n > unquote(max_ast))
 
     general =
       quote do
@@ -1994,34 +2017,23 @@ defmodule Heddle.Compiler do
           :improper -> {:error, {[], {:type, :proper_list, value}}}
           n when unquote(max_check) -> {:error, {[], {:too_large, n, unquote(max_ast)}}}
           0 -> {:ok, value, <<acc::binary, 106>>}
-          n -> unquote(body)
+          n -> unquote(list_body(loop, small?, extra))
         end
       end
 
-    general = if fast == [], do: general, else: quote(do: unquote(general))
-
-    clauses =
-      case fast do
-        [] ->
-          [
-            {quote(do: value), quote(do: is_list(value)), general},
-            {quote(do: value), nil, quote(do: {:error, {[], {:type, :list, value}}})}
-          ]
-
-        [{pattern, nil, string_body}] ->
-          [
-            {pattern, quote(do: is_list(value)),
-             quote do
-               case unquote(string_body) do
-                 :general -> unquote(general)
-                 result -> result
-               end
-             end},
-            {quote(do: value), nil, quote(do: {:error, {[], {:type, :list, value}}})}
-          ]
+    # A list of byte-range integers is written as STRING_EXT in one step,
+    # when the element codec allows it.
+    general =
+      case {pctx, string_elements(elem)} do
+        {nil, :all} -> string_first(string_encode(0, 255, max), general)
+        {nil, {:range, lo, hi}} -> string_first(string_encode(lo, hi, max), general)
+        _ -> general
       end
 
-    encoder(pctx, clauses)
+    encoder(pctx, [
+      {quote(do: value), quote(do: is_list(value)), general},
+      {quote(do: value), nil, quote(do: {:error, {[], {:type, :list, value}}})}
+    ])
   end
 
   defp enc_node({:tuple, elems}, _codec, pctx), do: enc_tuple(elems, pctx)
@@ -2084,13 +2096,15 @@ defmodule Heddle.Compiler do
     add_def(defp_ast(keys, [[], quote(do: keyed)] ++ extra, nil, quote(do: {:ok, keyed})))
 
     if pctx == nil do
-      for {guard, segments} <- inline_enc(key, quote(do: k)) do
+      for {guard, segments, check} <- inline_enc_checked(key, quote(do: k)) do
+        fast = quote(do: unquote(keys)(rest, [{unquote({:<<>>, [], segments}), v} | keyed]))
+
         add_def(
           defp_ast(
             keys,
             [quote(do: [{k, v} | rest]), quote(do: keyed)],
             guard,
-            quote(do: unquote(keys)(rest, [{unquote({:<<>>, [], segments}), v} | keyed]))
+            when_checked(check, fast, :slow)
           )
         )
       end
@@ -2116,19 +2130,16 @@ defmodule Heddle.Compiler do
     add_def(defp_ast(values, [[], quote(do: out)] ++ extra, nil, quote(do: {:ok, out})))
 
     if pctx == nil do
-      for {guard, segments} <- inline_enc(val, quote(do: v)) do
+      for {guard, segments, check} <- inline_enc_checked(val, quote(do: v)) do
+        appended = append_ast(quote(do: out), [quote(do: key_bytes :: binary) | segments])
+        fast = quote(do: unquote(values)(rest, unquote(appended)))
+
         add_def(
           defp_ast(
             values,
             [quote(do: [{key_bytes, v} | rest]), quote(do: out)],
             guard,
-            quote(
-              do:
-                unquote(values)(
-                  rest,
-                  unquote(append_ast(quote(do: out), [quote(do: key_bytes :: binary) | segments]))
-                )
-            )
+            when_checked(check, fast, :slow)
           )
         )
       end
@@ -2190,7 +2201,22 @@ defmodule Heddle.Compiler do
       end)
 
     fallback = {:->, [], [[true], quote(do: {:error, {[], {:no_alternative, value}}})]}
-    encoder(pctx, [{quote(do: value), nil, {:cond, [], [[do: branches ++ [fallback]]]}}])
+
+    # Alternatives that are a literal or a tuple of leaves encode in one
+    # clause here; their patterns are special cases of their shapes, which
+    # are disjoint, so these clauses pick the same alternative the shape
+    # dispatch would.
+    fast =
+      if pctx == nil do
+        for alt <- alts, {pattern, guard, segments} <- fused_enc(alt) do
+          {quote(do: unquote(pattern) = value), guard,
+           quote(do: {:ok, value, unquote(append_ast(quote(do: acc), segments))})}
+        end
+      else
+        []
+      end
+
+    encoder(pctx, fast ++ [{quote(do: value), nil, {:cond, [], [[do: branches ++ [fallback]]]}}])
   end
 
   defp enc_node({:iso, inner, decode, encode}, _codec, pctx) do
@@ -2260,49 +2286,98 @@ defmodule Heddle.Compiler do
   # segments are what the leaf appends and the decoded value is `var`
   # itself. Callers inline these before calling the encoder, which handles
   # everything else.
-  defp inline_enc(%Heddle{node: node}, var) do
-    case node do
-      {:integer, min, max}
-      when (is_integer(min) or is_nil(min)) and (is_integer(max) or is_nil(max)) ->
-        range = range_guard(var, min, max, min, max)
+  defp inline_enc(%Heddle{node: {:integer, min, max}}, var)
+       when (is_integer(min) or is_nil(min)) and (is_integer(max) or is_nil(max)) do
+    range = range_guard(var, min, max, min, max)
 
-        [
-          {quote(
-             do:
-               is_integer(unquote(var)) and unquote(var) >= 0 and unquote(var) <= 255 and
-                 unquote(range)
-           ), [97, var]},
-          {quote(
-             do:
-               is_integer(unquote(var)) and unquote(var) >= -2_147_483_648 and
-                 unquote(var) <= 2_147_483_647 and unquote(range)
-           ), [98, quote(do: unquote(var) :: signed - 32)]}
-        ]
+    [
+      {quote(
+         do:
+           is_integer(unquote(var)) and unquote(var) >= 0 and unquote(var) <= 255 and
+             unquote(range)
+       ), [97, var]},
+      {quote do
+         is_integer(unquote(var)) and unquote(var) >= -2_147_483_648 and
+           unquote(var) <= 2_147_483_647 and
+           unquote(range)
+       end, [98, quote(do: unquote(var) :: signed - 32)]}
+    ]
+  end
 
-      :float ->
-        [{quote(do: is_float(unquote(var))), [70, quote(do: unquote(var) :: float - 64)]}]
+  defp inline_enc(%Heddle{node: :float}, var),
+    do: [{quote(do: is_float(unquote(var))), [70, quote(do: unquote(var) :: float - 64)]}]
 
-      {:binary, max, false} when is_integer(max) or is_nil(max) ->
-        size = if max == nil, do: true, else: quote(do: byte_size(unquote(var)) <= unquote(max))
+  defp inline_enc(%Heddle{node: {:binary, max, false}}, var)
+       when is_integer(max) or is_nil(max) do
+    size = if max == nil, do: true, else: quote(do: byte_size(unquote(var)) <= unquote(max))
 
-        [
-          {quote(do: is_binary(unquote(var)) and unquote(size)),
-           [109, quote(do: byte_size(unquote(var)) :: 32), quote(do: unquote(var) :: binary)]}
-        ]
+    [
+      {quote(do: is_binary(unquote(var)) and unquote(size)),
+       [109, quote(do: byte_size(unquote(var)) :: 32), quote(do: unquote(var) :: binary)]}
+    ]
+  end
 
-      {:literal, atom} ->
-        [{quote(do: unquote(var) === unquote(atom)), :binary.bin_to_list(ETF.encode_atom(atom))}]
+  defp inline_enc(%Heddle{node: {:literal, atom}}, var), do: [atom_inline(atom, var)]
 
-      {:enum, atoms, _} ->
-        for atom <- atoms,
-            do:
-              {quote(do: unquote(var) === unquote(atom)),
-               :binary.bin_to_list(ETF.encode_atom(atom))}
+  defp inline_enc(%Heddle{node: {:enum, atoms, _}}, var),
+    do: Enum.map(atoms, &atom_inline(&1, var))
 
-      _ ->
-        []
+  defp inline_enc(_codec, _var), do: []
+
+  defp atom_inline(atom, var),
+    do: {quote(do: unquote(var) === unquote(atom)), :binary.bin_to_list(ETF.encode_atom(atom))}
+
+  # inline_enc/2 plus UTF-8 binaries, whose check guards cannot express:
+  # each is {guard, segments, check}, with check nil or an expression the
+  # caller tests before taking the fast path.
+  defp inline_enc_checked(%Heddle{node: {:binary, max, true}}, var)
+       when is_integer(max) or is_nil(max) do
+    size = if max == nil, do: true, else: quote(do: byte_size(unquote(var)) <= unquote(max))
+
+    [
+      {quote(do: is_binary(unquote(var)) and unquote(size)),
+       [109, quote(do: byte_size(unquote(var)) :: 32), quote(do: unquote(var) :: binary)],
+       quote(do: Heddle.SWAR.utf8?(unquote(var)))}
+    ]
+  end
+
+  defp inline_enc_checked(codec, var),
+    do: for({guard, segments} <- inline_enc(codec, var), do: {guard, segments, nil})
+
+  defp when_checked(nil, fast, _slow), do: fast
+
+  defp when_checked(check, fast, slow),
+    do: quote(do: if(unquote(check), do: unquote(fast), else: unquote(slow)))
+
+  # Encoder clauses that write a whole codec in one append, when it is a
+  # leaf or a tuple of leaves: each is {pattern, guard, segments}, the
+  # decoded value being the input. Combinations are capped at 32.
+  defp fused_enc(%Heddle{node: {:tuple, elems}}) when elems != [] and length(elems) <= 255 do
+    vars = for i <- 0..(length(elems) - 1), do: Macro.var(:"heddle_e#{i}", __MODULE__)
+    per_elem = elems |> Enum.zip(vars) |> Enum.map(fn {elem, var} -> inline_enc(elem, var) end)
+    count = Enum.reduce(per_elem, 1, &(length(&1) * &2))
+    per_elem = if count > 32, do: Enum.map(per_elem, &Enum.take(&1, 1)), else: per_elem
+
+    if Enum.any?(per_elem, &(&1 == [])) do
+      []
+    else
+      for combo <- combinations(per_elem) do
+        guard =
+          combo |> Enum.map(&elem(&1, 0)) |> Enum.reduce(&quote(do: unquote(&2) and unquote(&1)))
+
+        segments =
+          :binary.bin_to_list(ETF.tuple_header(length(elems))) ++
+            Enum.flat_map(combo, &elem(&1, 1))
+
+        {{:{}, [], vars}, guard, segments}
+      end
     end
   end
+
+  defp fused_enc(%Heddle{node: {:literal, atom}}),
+    do: [{atom, true, :binary.bin_to_list(ETF.encode_atom(atom))}]
+
+  defp fused_enc(_codec), do: []
 
   # `acc` with the segments appended.
   defp append_ast(acc, segments), do: {:<<>>, [], [quote(do: unquote(acc) :: binary) | segments]}
@@ -2346,26 +2421,44 @@ defmodule Heddle.Compiler do
     # Leaf elements append inline: the same bytes and value the element
     # encoder produces.
     if extra == [] do
-      for {guard, segments} <- inline_enc(elem, quote(do: x)) do
+      for {guard, segments, check} <- inline_enc_checked(elem, quote(do: x)) do
         # An element stays small exactly when it is a SMALL_INTEGER_EXT.
         small = if match?([97 | _], segments), do: quote(do: small), else: false
 
-        add_def(
-          defp_ast(
-            loop,
-            args.(quote(do: [x | rest])),
-            guard,
-            quote do
-              unquote(loop)(
-                rest,
-                i + 1,
-                unquote(append_ast(quote(do: out), segments)),
-                Heddle.Runtime.track_y(ys, x, x, original, i),
-                original,
-                unquote(small)
-              )
+        fast =
+          quote do
+            unquote(loop)(
+              rest,
+              i + 1,
+              unquote(append_ast(quote(do: out), segments)),
+              Heddle.Runtime.track_y(ys, x, x, original, i),
+              original,
+              unquote(small)
+            )
+          end
+
+        # A failed check takes the element encoder, which reports the error;
+        # checked leaves are never SMALL_INTEGER_EXT.
+        slow =
+          quote do
+            case unquote(invoke_enc(elem_caller, quote(do: x), quote(do: out))) do
+              {:ok, y, next} ->
+                unquote(loop)(
+                  rest,
+                  i + 1,
+                  next,
+                  Heddle.Runtime.track_y(ys, y, x, original, i),
+                  original,
+                  false
+                )
+
+              error ->
+                Heddle.Runtime.enc_prefix(error, i)
             end
-          )
+          end
+
+        add_def(
+          defp_ast(loop, args.(quote(do: [x | rest])), guard, when_checked(check, fast, slow))
         )
       end
     end
@@ -2406,10 +2499,52 @@ defmodule Heddle.Compiler do
     )
   end
 
+  # The list loop's call, and how its output becomes STRING_EXT or LIST_EXT.
+  defp list_body(loop, true, extra) do
+    quote do
+      case unquote(loop)(value, 0, <<>>, :same, value, true, unquote_splicing(extra)) do
+        {:ok, y, out, true} when n < 65_536 ->
+          {:ok, y, <<acc::binary, 107, n::16, Heddle.Runtime.untag_small(out)::binary>>}
+
+        {:ok, y, out, _small} ->
+          {:ok, y, <<acc::binary, 108, n::32, out::binary, 106>>}
+
+        error ->
+          error
+      end
+    end
+  end
+
+  defp list_body(loop, false, extra) do
+    quote do
+      case unquote(loop)(
+             value,
+             0,
+             <<acc::binary, 108, n::32>>,
+             :same,
+             value,
+             false,
+             unquote_splicing(extra)
+           ) do
+        {:ok, y, out, _small} -> {:ok, y, <<out::binary, 106>>}
+        error -> error
+      end
+    end
+  end
+
+  defp string_first(string_body, general) do
+    quote do
+      case unquote(string_body) do
+        :general -> unquote(general)
+        result -> result
+      end
+    end
+  end
+
   # A list of integers that each encode as SMALL_INTEGER_EXT is the
   # STRING_EXT the general path would build, written in one step; anything
   # else returns :general.
-  defp string_encode(lo, hi, max, _loop) do
+  defp string_encode(lo, hi, max) do
     limit = if max == nil, do: 65_535, else: min(max, 65_535)
 
     quote do
@@ -2455,14 +2590,29 @@ defmodule Heddle.Compiler do
         end
       end)
 
-    encoder(pctx, [
-      {quote(do: unquote({:{}, [], xs}) = value), nil,
-       quote do
-         acc = <<acc::binary, unquote(ETF.tuple_header(arity))::binary>>
-         unquote(chain)
-       end},
-      {quote(do: value), nil, quote(do: {:error, {[], {:type, {:tuple, unquote(arity)}, value}}})}
-    ])
+    fast =
+      if pctx == nil do
+        for {pattern, guard, segments} <- fused_enc(%Heddle{node: {:tuple, elems}}) do
+          {quote(do: unquote(pattern) = value), guard,
+           quote(do: {:ok, value, unquote(append_ast(quote(do: acc), segments))})}
+        end
+      else
+        []
+      end
+
+    encoder(
+      pctx,
+      fast ++
+        [
+          {quote(do: unquote({:{}, [], xs}) = value), nil,
+           quote do
+             acc = <<acc::binary, unquote(ETF.tuple_header(arity))::binary>>
+             unquote(chain)
+           end},
+          {quote(do: value), nil,
+           quote(do: {:error, {[], {:type, {:tuple, unquote(arity)}, value}}})}
+        ]
+    )
   end
 
   # Fields encode in key-byte order for the map layout, which is the order
@@ -2491,29 +2641,7 @@ defmodule Heddle.Compiler do
           ),
         else: rebuilt
 
-    {steps, prefix} =
-      case layout do
-        :map ->
-          ordered =
-            [{:__struct__, nil} | Enum.map(names, &{&1, &1})]
-            |> Enum.sort_by(fn {key, _} -> ETF.encode_atom(key) end)
-
-          steps =
-            Enum.map(ordered, fn
-              {:__struct__, nil} ->
-                {:constant, ETF.encode_atom(:__struct__) <> ETF.encode_atom(module)}
-
-              {key, name} ->
-                {:field, name, ETF.encode_atom(key)}
-            end)
-
-          {steps, ETF.map_header(length(names) + 1)}
-
-        {:tuple, tag} ->
-          steps = Enum.map(names, &{:field, &1, <<>>})
-          prefix = ETF.tuple_header(length(names) + if(tag, do: 1, else: 0))
-          {steps, if(tag, do: prefix <> ETF.encode_atom(tag), else: prefix)}
-      end
+    {steps, prefix} = struct_steps(module, layout, names)
 
     on_error =
       case layout do
@@ -2554,27 +2682,7 @@ defmodule Heddle.Compiler do
             )
 
           codec = Enum.find_value(fields, fn {n, c, _} -> if n == name, do: c end)
-
-          # A leaf field appends inline when its fast path applies.
-          encoded =
-            case if(pctx == nil, do: inline_enc(codec, xs[name]), else: []) do
-              [] ->
-                call
-
-              fast ->
-                clauses =
-                  Enum.map(fast, fn {guard, segments} ->
-                    bytes = append_ast(quote(do: acc), :binary.bin_to_list(key_bytes) ++ segments)
-
-                    {:->, [],
-                     [
-                       [{:when, [], [quote(do: _), guard]}],
-                       quote(do: {:ok, unquote(xs[name]), unquote(bytes)})
-                     ]}
-                  end)
-
-                {:case, [], [xs[name], [do: clauses ++ [{:->, [], [[quote(do: _)], call]}]]]}
-            end
+          encoded = field_encode(codec, xs[name], key_bytes, call, pctx)
 
           quote do
             case unquote(encoded) do
@@ -2596,6 +2704,47 @@ defmodule Heddle.Compiler do
       {quote(do: value), nil,
        quote(do: {:error, {[], {:type, {:struct, unquote(module)}, value}}})}
     ])
+  end
+
+  # The struct's output as steps, in output order, and the bytes before
+  # them: the map layout writes keys sorted by their bytes, the tuple layout
+  # writes fields in declared order after an optional tag.
+  defp struct_steps(module, :map, names) do
+    steps =
+      [{:__struct__, nil} | Enum.map(names, &{&1, &1})]
+      |> Enum.sort_by(fn {key, _} -> ETF.encode_atom(key) end)
+      |> Enum.map(fn
+        {:__struct__, nil} -> {:constant, ETF.encode_atom(:__struct__) <> ETF.encode_atom(module)}
+        {key, name} -> {:field, name, ETF.encode_atom(key)}
+      end)
+
+    {steps, ETF.map_header(length(names) + 1)}
+  end
+
+  defp struct_steps(_module, {:tuple, tag}, names) do
+    prefix = ETF.tuple_header(length(names) + if(tag, do: 1, else: 0))
+
+    {Enum.map(names, &{:field, &1, <<>>}),
+     if(tag, do: prefix <> ETF.encode_atom(tag), else: prefix)}
+  end
+
+  # A field's encoding: a leaf appends inline when its fast path applies,
+  # anything else calls the field's encoder.
+  defp field_encode(codec, var, key_bytes, call, pctx) do
+    case if(pctx == nil, do: inline_enc_checked(codec, var), else: []) do
+      [] ->
+        call
+
+      fast ->
+        clauses =
+          Enum.map(fast, fn {guard, segments, check} ->
+            bytes = append_ast(quote(do: acc), :binary.bin_to_list(key_bytes) ++ segments)
+            ok = quote(do: {:ok, unquote(var), unquote(bytes)})
+            {:->, [], [[{:when, [], [quote(do: _), guard]}], when_checked(check, ok, call)]}
+          end)
+
+        {:case, [], [var, [do: clauses ++ [{:->, [], [[quote(do: _)], call]}]]]}
+    end
   end
 
   defp covers_struct?(module, names) do

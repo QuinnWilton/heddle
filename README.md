@@ -134,23 +134,30 @@ the interpreter, and `Heddle.lint/1` reports unbounded positions.
 
 ## Performance
 
-`mix run bench/codecs.exs`, medians on an Apple M1 Max, Elixir 1.20.4 on
-OTP 29.1. `binary_to_term` builds an untyped term without validating it;
-Heddle checks every byte against the codec, enforces the limits and builds
-the structs.
+`mix run bench/ratios.exs` reports each compiled codec as a multiple of the
+BIF it replaces (lower is better; below 1.00x is faster than the BIF).
+Medians on an Apple M1 Max, Elixir 1.20.4 on OTP 29.1:
 
-| Payload | decode: `binary_to_term` | decode: Heddle | encode: `term_to_binary` | encode: Heddle |
-| --- | ---: | ---: | ---: | ---: |
-| Session struct (177 B) | 0.46 µs | 0.88 µs | 0.38 µs | 1.0 µs |
-| 1,000 integers | 3.5 µs | 12 µs | 12 µs | 24 µs |
-| 16 × 1 KiB binaries | 1.6 µs | 6.5 µs | 0.96 µs | 6.3 µs |
-| 16 × 1 KiB UTF-8 text | 1.6 µs | 11 µs | 1.0 µs | 11 µs |
-| 4,000 integers in 0..100 | 2.5 µs | 4.3 µs | 16 µs | 26 µs |
-| 100 union commands | 5.0 µs | 9.6 µs | 4.1 µs | 6.3 µs |
-| 100 derived structs | 21 µs | 32 µs | 13 µs | 21 µs |
+| Payload | decode vs `binary_to_term(b, [:safe])` | encode vs `term_to_binary` |
+| --- | ---: | ---: |
+| Session struct (177 B) | 1.4x | 1.1x |
+| 1,000 integers | 1.4x | 1.1x |
+| 16 × 1 KiB binaries | 2.9x | 1.9x |
+| 16 × 1 KiB UTF-8 text | 4.6x | 5.4x |
+| 4,000 integers in 0..100 | 1.2x | 0.7x |
+| 100 union commands | 1.5x | 0.7x |
+| 100 derived structs | 1.1x | 0.8x |
 
-The interpreter is 3 to 130 times slower than compiled codecs on the same
-payloads.
+The BIFs build or write untyped terms without checking them; Heddle checks
+every byte against the codec, enforces the limits and builds the structs.
+The remaining gaps are mostly that work: binary-heavy payloads pay for
+copying kept binaries (the default `binaries: :copy`), and UTF-8 text pays
+for validation, which runs seven bytes per word with an ASCII fast path.
+Compiled encoders append to one binary rather than building iodata, which is
+why several shapes encode faster than `term_to_binary`.
+
+`mix run bench/codecs.exs` gives full Benchee reports, including the
+interpreter, which is 3 to 130 times slower than compiled codecs.
 
 ## Design
 
