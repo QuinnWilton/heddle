@@ -8,7 +8,7 @@ defmodule Heddle.Syntax do
         version <- Heddle.integer(min: 1, max: 2) <~ field(:version)
         body <- (case version do
                    1 -> Heddle.binary(max_size: 1024)
-                   2 -> MyApp.Command.codec()
+                   2 -> MyApp.Shape.codec()
                  end) <~ field(:body)
         pure %{version: version, body: body}
       end

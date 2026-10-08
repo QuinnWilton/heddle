@@ -54,16 +54,23 @@ from the same constructors run in an interpreter with the same semantics.
 ### Tagged unions
 
 ```elixir
-defmodule MyApp.Command do
+defmodule MyApp.Shape do
   use Heddle.Schema
 
   defunion do
-    variant :ping
-    variant :put, key: Heddle.binary(max_size: 128), value: Heddle.binary(max_size: 4096)
-    variant :delete, key: Heddle.binary(max_size: 128)
+    variant :empty
+    variant :circle, radius: Heddle.integer(min: 1)
+    variant :rect, width: Heddle.integer(min: 1), height: Heddle.integer(min: 1)
   end
 end
+
+{:ok, _} = Heddle.encode(MyApp.Shape.codec(), {:rect, 3, 4})
 ```
+
+Each variant is a tag and its fields, written `name: codec`. A variant with
+no fields is the bare atom (`:empty`); the others are tuples of the tag and
+the field values in order (`{:circle, radius}`, `{:rect, width, height}`).
+The field names document each position; the values carry no names.
 
 ### Structs you own, and structs you don't
 
@@ -94,7 +101,7 @@ defmodule MyApp.Envelope do
       version <- Heddle.integer(min: 1, max: 2) <~ field(:version)
       body <- (case version do
                  1 -> Heddle.binary(max_size: 1024)
-                 2 -> MyApp.Command.codec()
+                 2 -> MyApp.Shape.codec()
                end) <~ field(:body)
       pure %{version: version, body: body}
     end

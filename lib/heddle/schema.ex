@@ -172,13 +172,15 @@ defmodule Heddle.Schema do
   Defines a tagged union as `codec/0` and its `t/0` type.
 
       defunion do
-        variant :ping
-        variant :put, key: Heddle.binary(max_size: 128), value: Heddle.binary(max_size: 4096)
-        variant :delete, key: Heddle.binary(max_size: 128)
+        variant :empty
+        variant :circle, radius: Heddle.integer(min: 1)
+        variant :rect, width: Heddle.integer(min: 1), height: Heddle.integer(min: 1)
       end
 
-  A nullary variant is the bare atom; the others are tuples tagged by the
-  variant's name, with the fields in order (`{:put, key, value}`).
+  Each variant is a tag and its fields, written `name: codec`. A variant with
+  no fields is the bare atom (`:empty`); the others are tuples of the tag and
+  the field values in order (`{:circle, radius}`, `{:rect, width, height}`).
+  The field names document each position; the values carry no names.
   """
   defmacro defunion(do: block) do
     variants =

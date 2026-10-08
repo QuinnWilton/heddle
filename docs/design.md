@@ -310,17 +310,19 @@ This generates `defstruct`, `@type t`, a compiled `codec/0` and the constructor 
 ### Tagged unions
 
 ```elixir
-defmodule MyApp.Command do
+defmodule MyApp.Shape do
   use Heddle.Schema
 
   defunion do
-    variant :ping                                          # :ping
-    variant :put,    [key: Heddle.binary(max_size: 128),
-                      value: Heddle.binary(max_size: 4096)]  # {:put, key, value}
-    variant :delete, [key: Heddle.binary(max_size: 128)]    # {:delete, key}
+    variant :empty                                     # :empty
+    variant :circle, radius: Heddle.integer(min: 1)    # {:circle, radius}
+    variant :rect, width: Heddle.integer(min: 1),
+                   height: Heddle.integer(min: 1)      # {:rect, width, height}
   end
 end
 ```
+
+Each variant is a tag and its fields, written `name: codec`. The field names document each tuple position; the decoded value is the tuple itself, so `{:rect, 3, 4}` is a rectangle of width 3 and height 4.
 
 v1 supports one union encoding: tagged tuples, with nullary variants as bare atoms. It is idiomatic Erlang and dispatches on the leading atom, so FIRST sets are trivially disjoint. Map-based and untagged encodings are deferred.
 
@@ -337,7 +339,7 @@ defcodec envelope do
     version <- Heddle.integer(min: 1, max: 2) <~ field(:version)
     body    <- (case version do
                   1 -> Heddle.binary(max_size: 1024)
-                  2 -> MyApp.Command.codec()
+                  2 -> MyApp.Shape.codec()
                 end) <~ field(:body)
     pure %Envelope{version: version, body: body}
   end
