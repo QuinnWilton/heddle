@@ -406,7 +406,6 @@ defmodule Heddle.CompilerTest do
         compile_error("""
         defmodule Heddle.Test.Bad8 do
           use Heddle.Schema
-          import Heddle.Syntax
           defcodec c do
             tuple_seq do
               x <- Heddle.integer()
@@ -424,7 +423,6 @@ defmodule Heddle.CompilerTest do
       source = """
       defmodule Heddle.Test.Opaque do
         use Heddle.Schema
-        import Heddle.Syntax
 
         defcodec c do
           tuple_seq do

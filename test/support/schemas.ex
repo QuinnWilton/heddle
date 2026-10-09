@@ -3,15 +3,11 @@ defmodule Heddle.Test.Session do
   use Heddle.Schema
 
   defschema as: :map do
-    field(:user_id, Heddle.integer(min: 1))
-    field(:roles, Heddle.list(Heddle.enum([:admin, :editor, :viewer]), max: 16))
-    field(:expires_at, Heddle.integer(min: 0))
+    field :user_id, integer(min: 1)
+    field :roles, list(enum([:admin, :editor, :viewer]), max: 16)
+    field :expires_at, integer(min: 0)
 
-    field(
-      :meta,
-      Heddle.map_of(Heddle.binary(max_size: 64), Heddle.binary(max_size: 256), max: 32),
-      default: %{}
-    )
+    field :meta, map_of(binary(max_size: 64), binary(max_size: 256), max: 32), default: %{}
   end
 end
 
@@ -20,54 +16,53 @@ defmodule Heddle.Test.Command do
   use Heddle.Schema
 
   defunion do
-    variant(:ping)
-    variant(:put, key: Heddle.binary(max_size: 128), value: Heddle.binary(max_size: 4096))
-    variant(:delete, key: Heddle.binary(max_size: 128))
+    variant :ping
+    variant :put, key: binary(max_size: 128), value: binary(max_size: 4096)
+    variant :delete, key: binary(max_size: 128)
   end
 end
 
 defmodule Heddle.Test.Env do
   @moduledoc false
   use Heddle.Schema
-  import Heddle.Syntax
 
   defcodec envelope do
     tuple_seq tag: :envelope do
-      version <- Heddle.integer(min: 1, max: 2) <~ field(:version)
+      version <- integer(min: 1, max: 2) <~ field(:version)
 
       body <-
         case version do
-          1 -> Heddle.binary(max_size: 1024)
+          1 -> binary(max_size: 1024)
           2 -> Heddle.Test.Command.codec()
         end
         <~ field(:body)
 
-      pure(%{version: version, body: body})
+      pure %{version: version, body: body}
     end
   end
 
   defcodec sized do
     tuple_seq do
-      n <- Heddle.integer(min: 0, max: 1000) <~ field(:n)
-      items <- Heddle.list(Heddle.integer(), max: n) <~ field(:items)
-      pure(%{n: n, items: items})
+      n <- integer(min: 0, max: 1000) <~ field(:n)
+      items <- list(integer(), max: n) <~ field(:items)
+      pure %{n: n, items: items}
     end
   end
 
   defcodec tree do
-    Heddle.one_of([
-      Heddle.atom(:leaf),
-      Heddle.tuple([Heddle.atom(:node), tree(), Heddle.integer(), tree()])
+    one_of([
+      atom(:leaf),
+      tuple([atom(:node), tree(), integer(), tree()])
     ])
   end
 
   defcodec lazy_tree do
-    Heddle.one_of([Heddle.null(), Heddle.list(Heddle.lazy(&lazy_tree/0), max: 3)])
+    one_of([null(), list(lazy(&lazy_tree/0), max: 3)])
   end
 
   defcodec refined do
-    Heddle.refine(Heddle.integer(), &even?/1, :even)
-    |> Heddle.iso(&{:ok, {:n, &1}}, fn
+    refine(integer(), &even?/1, :even)
+    |> iso(&{:ok, {:n, &1}}, fn
       {:n, x} -> {:ok, x}
       _ -> :error
     end)
@@ -78,8 +73,9 @@ end
 
 defmodule Heddle.Test.User do
   @moduledoc false
-  @derive {Heddle.Codec,
-           fields: [id: Heddle.integer(min: 1), name: Heddle.binary(max_size: 100, utf8: true)]}
+  import Heddle.DSL
+
+  @derive {Heddle.Codec, fields: [id: integer(min: 1), name: binary(max_size: 100, utf8: true)]}
   defstruct [:id, :name, :cache]
 end
 
@@ -88,9 +84,9 @@ defmodule Heddle.Test.Team do
   use Heddle.Schema
 
   defschema do
-    field(:name, Heddle.binary(max_size: 20))
-    field(:lead, Heddle.Test.User)
-    field(:members, Heddle.list(Heddle.Test.User, max: 10))
+    field :name, binary(max_size: 20)
+    field :lead, Heddle.Test.User
+    field :members, list(Heddle.Test.User, max: 10)
   end
 end
 
@@ -102,14 +98,14 @@ defmodule Heddle.Test.UriCodecs do
     Heddle.struct(URI,
       as: :map,
       fields: [
-        scheme: Heddle.enum([:http, :https], unknown: :keep),
-        host: Heddle.binary(max_size: 253)
+        scheme: enum([:http, :https], unknown: :keep),
+        host: binary(max_size: 253)
       ]
     )
   end
 
   defcodec profile do
-    Heddle.map(required: [homepage: uri_codec()])
+    map(required: [homepage: uri_codec()])
   end
 end
 
@@ -119,8 +115,8 @@ defmodule Heddle.Test.Folder do
   use Heddle.Schema
 
   defschema do
-    field(:name, Heddle.binary(max_size: 32))
-    field(:files, Heddle.list(Heddle.Test.File, max: 8))
+    field :name, binary(max_size: 32)
+    field :files, list(Heddle.Test.File, max: 8)
   end
 end
 
@@ -129,8 +125,8 @@ defmodule Heddle.Test.File do
   use Heddle.Schema
 
   defschema as: :tuple, tag: :file do
-    field(:name, Heddle.binary(max_size: 32))
-    field(:parent, Heddle.one_of([Heddle.null(), Heddle.Test.Folder]))
+    field :name, binary(max_size: 32)
+    field :parent, one_of([null(), Heddle.Test.Folder])
   end
 end
 
@@ -144,47 +140,47 @@ defmodule Heddle.Test.Producers do
   end
 
   defcodec commands do
-    Heddle.list(Heddle.Test.Command, max: 10)
+    list(Heddle.Test.Command, max: 10)
   end
 
   defcodec integers do
-    Heddle.list(Heddle.integer(), max: 10)
+    list(integer(), max: 10)
   end
 
   defcodec floats do
-    Heddle.list(Heddle.float(), max: 10)
+    list(float(), max: 10)
   end
 
   defcodec atoms do
-    Heddle.list(Heddle.enum([:é, :ok, :ünïcode, :日本]), max: 10)
+    list(enum([:é, :ok, :ünïcode, :日本]), max: 10)
   end
 
   defcodec charlists do
-    Heddle.list(Heddle.charlist(max: 10), max: 10)
+    list(charlist(max: 10), max: 10)
   end
 
   defcodec binaries do
-    Heddle.list(Heddle.binary(max_size: 1000, utf8: true), max: 10)
+    list(binary(max_size: 1000, utf8: true), max: 10)
   end
 
   defcodec nested do
-    Heddle.tuple([
-      Heddle.atom(:tag),
-      Heddle.list(
-        Heddle.one_of([Heddle.tagged(:a, Heddle.integer()), Heddle.tagged(:b, Heddle.binary())]),
+    tuple([
+      atom(:tag),
+      list(
+        one_of([tagged(:a, integer()), tagged(:b, binary())]),
         max: 4
       ),
-      Heddle.map([]),
-      Heddle.tuple([])
+      map([]),
+      tuple([])
     ])
   end
 
   defcodec bigmap do
-    Heddle.map_of(Heddle.integer(min: 0), Heddle.integer(min: 0), max: 64)
+    map_of(integer(min: 0), integer(min: 0), max: 64)
   end
 
   defcodec unknown do
-    Heddle.list(Heddle.enum([:http, :https], unknown: :keep), max: 10)
+    list(enum([:http, :https], unknown: :keep), max: 10)
   end
 end
 
@@ -193,8 +189,8 @@ defmodule Heddle.Test.Point2D do
   use Heddle.Schema
 
   defschema as: :tuple, tag: :point do
-    field(:x, Heddle.integer(min: -10_000, max: 10_000))
-    field(:y, Heddle.integer(min: -10_000, max: 10_000))
+    field :x, integer(min: -10_000, max: 10_000)
+    field :y, integer(min: -10_000, max: 10_000)
   end
 end
 
@@ -205,10 +201,10 @@ defmodule Heddle.Test.Drawing do
   use Heddle.Schema
 
   defunion do
-    variant(:empty)
-    variant(:circle, center: Heddle.Test.Point2D, radius: Heddle.integer(min: 1, max: 10_000))
-    variant(:polygon, points: Heddle.list(Heddle.Test.Point2D, max: 64))
-    variant(:group, shapes: Heddle.list(Heddle.Test.Drawing, max: 16))
+    variant :empty
+    variant :circle, center: Heddle.Test.Point2D, radius: integer(min: 1, max: 10_000)
+    variant :polygon, points: list(Heddle.Test.Point2D, max: 64)
+    variant :group, shapes: list(Heddle.Test.Drawing, max: 16)
   end
 end
 
@@ -218,6 +214,6 @@ defmodule Heddle.Test.Accounts do
   use Heddle.Schema
 
   defcodec account do
-    Heddle.one_of([Heddle.atom(:anonymous), Heddle.Test.Session, Heddle.Test.Team])
+    one_of([atom(:anonymous), Heddle.Test.Session, Heddle.Test.Team])
   end
 end

@@ -12,7 +12,7 @@ The design lives in `docs/design.md`; it is the specification, so read it before
 - `Heddle.Interpreter` - the reference semantics. Compiled codecs must agree with it on every input.
 - `Heddle.Runtime` - everything both backends share: the decoder/encoder calling convention, limit checks, leaf readers, container encoders. Any decision that shapes an error lives here.
 - `Heddle.Compiler` (+ `Compiler.Seq`, `Compiler.Expr`) - IR to bit-syntax functions; `Seq` is binding-time analysis of `bind`; `Expr` prepares codec expressions for compile-time evaluation (closures become `FunRef`s carrying their source).
-- `Heddle.Schema`, `Heddle.Codec`, `Heddle.Syntax` - the front ends (`defcodec`/`defschema`/`defunion`, `@derive`, `tuple_seq` blocks).
+- `Heddle.Schema`, `Heddle.Codec`, `Heddle.DSL` - the front ends (`defcodec`/`defschema`/`defunion`, `@derive`, importable constructors and `tuple_seq` blocks). `Compiler.Expr` rewrites `Heddle.DSL` calls to `Heddle` ones, so the compiler only matches `Heddle.f` calls.
 - `Heddle.Diagnostics` - pentiment rendering of `CodecError`s; `Heddle.Lint` - L001/W001 findings.
 - `Heddle.SWAR` - word-at-a-time scans (56-bit words stay small integers).
 - `Heddle.Gen`, `Heddle.Laws`, `Heddle.Check` - generators, round-trip laws, differential checks.

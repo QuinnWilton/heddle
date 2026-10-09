@@ -3,8 +3,9 @@ defmodule Heddle.Compiler.Expr do
   # Prepares a codec expression so a Heddle macro can evaluate it at compile
   # time, within the rules of the compilation model:
   #
-  #   * macros are expanded first, so pipes, `Heddle.Syntax` blocks and
-  #     `if` become plain calls;
+  #   * macros are expanded first, so pipes, `tuple_seq` blocks and `if`
+  #     become plain calls, and calls to `Heddle.DSL` become calls to the
+  #     `Heddle` functions they delegate to;
   #   * every function (`fn` or `&`) becomes a FunRef placeholder; the
   #     compiler keeps its source and the variables in scope where it was
   #     created, so compiled code can embed it and the compiler can evaluate
@@ -80,10 +81,31 @@ defmodule Heddle.Compiler.Expr do
     Macro.prewalk(ast, fn
       {:fn, _, _} = fun -> fun
       {:&, _, _} = capture -> capture
-      node -> Macro.expand(node, env)
+      node -> node |> Macro.expand(env) |> canonical(env)
     end)
     |> expand_inside_functions(env)
   end
+
+  # Every Heddle.DSL function delegates to the Heddle function of the same
+  # name, so rewriting to that spelling lets the rest of the compiler (spans,
+  # binding-time analysis) match a single form.
+  defp canonical({{:., meta, [module, fun]}, call_meta, args} = node, env) when is_list(args) do
+    if Macro.expand(module, env) == Heddle.DSL,
+      do: {{:., meta, [Heddle, fun]}, call_meta, args},
+      else: node
+  end
+
+  defp canonical({name, meta, args} = node, env) when is_atom(name) and is_list(args) do
+    if Macro.Env.lookup_import(env, {name, length(args)}) == [{:function, Heddle.DSL}] and
+         not local_codec?(name, args),
+       do: {{:., meta, [Heddle, name]}, meta, args},
+       else: node
+  end
+
+  defp canonical(node, _env), do: node
+
+  defp local_codec?(name, []), do: (st = state()) != nil and MapSet.member?(st.locals, name)
+  defp local_codec?(_name, _args), do: false
 
   # Function bodies are expanded too, so their sources are plain calls when
   # the compiler analyzes them; they are not walked, since they run later.

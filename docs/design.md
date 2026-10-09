@@ -138,7 +138,7 @@ Heddle.pure(value)                # ends a sequence with its result
 | Uncurried product `<*>` | `Heddle.tuple/1` |
 | Alternative `<\|>` | `Heddle.one_of/1`, restricted to deterministic choice |
 | `comap` / `upon` (Xia et al.), `lmap` | `Heddle.from/2` |
-| Monadic bind | `Heddle.bind/2` and the `Heddle.Syntax` block form |
+| Monadic bind | `Heddle.bind/2` and the `tuple_seq` block form (`Heddle.DSL`) |
 | `purify` | `Heddle.project/2` (and `Heddle.conforms?/2`) |
 | Bigenerator | `Heddle.Gen.from/1` |
 
@@ -364,17 +364,16 @@ Untagged unions of plain maps stay a compile error: without a discriminating key
 
 ## Dependent codecs with `bind`
 
-`bind` lets a later codec depend on a value decoded earlier. ETF already carries its own lengths and type tags, so the case left is schema-level dependency: a field whose codec is chosen by another field. `Heddle.Syntax` gives the block form from Xia et al.; `<~` is infix `from`.
+`bind` lets a later codec depend on a value decoded earlier. ETF already carries its own lengths and type tags, so the case left is schema-level dependency: a field whose codec is chosen by another field. `Heddle.DSL` gives the block form from Xia et al.; `<~` is infix `from`.
 
 ```elixir
 use Heddle.Schema
-import Heddle.Syntax
 
 defcodec envelope do
   tuple_seq tag: :envelope do
-    version <- Heddle.integer(min: 1, max: 2) <~ field(:version)
+    version <- integer(min: 1, max: 2) <~ field(:version)
     body    <- (case version do
-                  1 -> Heddle.binary(max_size: 1024)
+                  1 -> binary(max_size: 1024)
                   2 -> MyApp.Shape.codec()
                 end) <~ field(:body)
     pure %Envelope{version: version, body: body}
@@ -384,7 +383,7 @@ end
 
 `version` comes from a two-value range, so this bind is finite: the continuation is evaluated for 1 and 2 at compile time and the bind expands into a `one_of`.
 
-- **Binding-time analysis classifies each continuation.** Inside a `Heddle.Syntax` block the continuation is AST at compile time, and it follows the same rules as any compiled codec expression (see Compilation model): it cannot call the module's own `def` or `defp` functions. Each use of the bound value is classified:
+- **Binding-time analysis classifies each continuation.** Inside a `tuple_seq` block the continuation is AST at compile time, and it follows the same rules as any compiled codec expression (see Compilation model): it cannot call the module's own `def` or `defp` functions. Each use of the bound value is classified:
   - **Finite:** the value comes from a codec with at most 64 values (`enum`, `boolean`, an integer range of at most 64 values). The continuation is evaluated for every value and the bind expands into a `one_of`. Nested finite binds may expand to at most 256 alternatives in total; past that, the bind is classified as parameter or opaque instead.
   - **Parameter:** the value appears only in parameter positions of codec constructors, such as a bound (`Heddle.binary(max_size: n)`, `Heddle.list(elem, max: n)`) or a branch selector in a `case` whose arms are codecs. The shape is static, so it compiles once into a decoder that takes the value as a runtime argument.
   - **Opaque:** anything else. The returned codec runs in the interpreter, and `Heddle.lint/1` flags it.
@@ -402,7 +401,7 @@ The interpreter is the reference semantics. The compiled decoder must agree with
 
 ### Compilation model
 
-Heddle compiles a codec where one of its macros sees it: `defschema`, `defunion`, `@derive {Heddle.Codec, ...}` and `defcodec`. The macro evaluates the codec expression during expansion, runs the static checks on its IR, and generates the decoder and encoder as functions in the calling module. Any other codec value, built at runtime by plain combinator calls (including a `Heddle.Syntax` block outside these macros), runs in the interpreter. Nothing is ever compiled at runtime.
+Heddle compiles a codec where one of its macros sees it: `defschema`, `defunion`, `@derive {Heddle.Codec, ...}` and `defcodec`. The macro evaluates the codec expression during expansion, runs the static checks on its IR, and generates the decoder and encoder as functions in the calling module. Any other codec value, built at runtime by plain combinator calls (including a `tuple_seq` block outside these macros), runs in the interpreter. Nothing is ever compiled at runtime.
 
 ```elixir
 use Heddle.Schema
@@ -417,12 +416,14 @@ end
 A codec expression inside these macros may contain only:
 
 - literals and module attributes;
-- Heddle's constructors and combinators, and `Heddle.Syntax` blocks;
+- Heddle's constructors and combinators, and `tuple_seq` blocks;
 - local calls to codecs defined earlier in the same module with `defcodec`;
 - a module name standing for that module's struct codec (see Nested structs);
 - remote calls to other modules.
 
 Anything else, such as a call to the module's own `def` or `defp` functions, cannot run while its module is still being compiled. It is a compile error that points at the call and suggests `defcodec` or moving the helper to another module.
+
+`use Heddle.Schema` imports `Heddle.DSL`, which delegates each constructor except `struct/2` (taken by `Kernel.struct/2`) to `Heddle`. While expanding a codec expression, the compiler rewrites an imported call, or a call to `Heddle.DSL.f`, into `Heddle.f`, so the spelling never changes spans, diagnostics or binding-time analysis. A zero-arity call that names a codec defined earlier with `defcodec` stays a reference to that codec.
 
 Dependencies follow from these rules:
 

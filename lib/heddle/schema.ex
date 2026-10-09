@@ -6,12 +6,14 @@ defmodule Heddle.Schema do
         use Heddle.Schema
 
         defschema as: :map do
-          field :user_id, Heddle.integer(min: 1)
-          field :roles, Heddle.list(Heddle.enum([:admin, :editor, :viewer]), max: 16)
-          field :meta, Heddle.map_of(Heddle.binary(max_size: 64), Heddle.binary(max_size: 256), max: 32),
-            default: %{}
+          field :user_id, integer(min: 1)
+          field :roles, list(enum([:admin, :editor, :viewer]), max: 16)
+          field :meta, map_of(binary(max_size: 64), binary(max_size: 256), max: 32), default: %{}
         end
       end
+
+  `use Heddle.Schema` imports `Heddle.DSL`, so the constructors need no
+  `Heddle.` prefix.
 
   Heddle compiles a codec where one of these macros sees it. The macro
   evaluates the codec expression during expansion, runs the static checks on
@@ -21,7 +23,8 @@ defmodule Heddle.Schema do
   ## What a codec expression may contain
 
     * literals and module attributes;
-    * Heddle's constructors and combinators, and `Heddle.Syntax` blocks;
+    * Heddle's constructors and combinators, imported from `Heddle.DSL` or
+      qualified, and `tuple_seq` blocks;
     * local calls to codecs defined earlier in the same module with
       `defcodec` (and the codec being defined, for recursion);
     * a module name standing for that module's struct codec;
@@ -52,6 +55,7 @@ defmodule Heddle.Schema do
   defmacro __using__(_opts) do
     quote do
       import Heddle.Schema, only: [defcodec: 2, defschema: 1, defschema: 2, defunion: 1]
+      import Heddle.DSL, warn: false
       unquote(setup())
     end
   end
@@ -71,7 +75,7 @@ defmodule Heddle.Schema do
   Defines a compiled codec `name/0`.
 
       defcodec hostname do
-        Heddle.binary(max_size: 253, utf8: true)
+        binary(max_size: 253, utf8: true)
       end
   """
   defmacro defcodec(name, do: expr) when is_atom(name) do
@@ -86,8 +90,8 @@ defmodule Heddle.Schema do
   Defines a struct, its `t/0` type and its compiled codec `codec/0`.
 
       defschema as: :map do
-        field :id, Heddle.integer(min: 1)
-        field :name, Heddle.binary(max_size: 100), default: ""
+        field :id, integer(min: 1)
+        field :name, binary(max_size: 100), default: ""
       end
 
   Options are `as: :map` (the default) or `as: :tuple`, and `tag:` for the
@@ -173,8 +177,8 @@ defmodule Heddle.Schema do
 
       defunion do
         variant :empty
-        variant :circle, radius: Heddle.integer(min: 1)
-        variant :rect, width: Heddle.integer(min: 1), height: Heddle.integer(min: 1)
+        variant :circle, radius: integer(min: 1)
+        variant :rect, width: integer(min: 1), height: integer(min: 1)
       end
 
   Each variant is a tag and its fields, written `name: codec`. A variant with
@@ -187,8 +191,8 @@ defmodule Heddle.Schema do
   lists of them, and a union can name itself to nest:
 
       defunion do
-        variant :circle, center: MyApp.Point, radius: Heddle.integer(min: 1)
-        variant :group, shapes: Heddle.list(MyApp.Drawing, max: 16)
+        variant :circle, center: MyApp.Point, radius: integer(min: 1)
+        variant :group, shapes: list(MyApp.Drawing, max: 16)
       end
   """
   defmacro defunion(do: block) do

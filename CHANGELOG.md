@@ -14,7 +14,7 @@
 - `Heddle.Gen`, `Heddle.Laws` and `Heddle.Check` for property and
   differential testing; `Heddle.Lint` for unbounded positions.
 - Compiled codecs: `Heddle.Schema` (`defcodec`, `defschema`, `defunion`),
-  `@derive Heddle.Codec`, and `Heddle.Syntax` blocks compile to binary
+  `@derive Heddle.Codec`, and `tuple_seq` blocks compile to binary
   pattern matches at build time, with binding-time analysis of `bind`
   (finite, parameter and opaque binds) and pentiment diagnostics for every
   static check.
@@ -25,3 +25,9 @@
 - Unions of structs laid out as maps: `one_of/1` dispatches on the
   `:__struct__` key wherever it sits in the map, reading what
   `term_to_binary/1` writes for structs.
+- `Heddle.DSL`, the constructors ready to import, with the `tuple_seq`
+  block form and infix `<~`. It replaces `Heddle.Syntax`. `use
+  Heddle.Schema` imports it, so codecs read `list(integer(), max: 16)`.
+- The formatter exports `locals_without_parens` for `field`, `variant`,
+  `defcodec`, `defschema`, `defunion`, `tuple_seq` and `pure`; add
+  `import_deps: [:heddle]` to keep them paren-free.

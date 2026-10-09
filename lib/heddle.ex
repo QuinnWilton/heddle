@@ -33,6 +33,9 @@ defmodule Heddle do
   defined with `Heddle.Schema` (`defcodec`, `defschema`, `defunion`) or
   derived with `@derive Heddle.Codec` compile to binary pattern matches at
   build time. See the design document for the full specification.
+
+  `Heddle.DSL` exports the constructors for import, so a codec can read
+  `list(integer(), max: 16)`. `use Heddle.Schema` imports it.
   """
 
   alias Heddle.{CodecError, DecodeError, EncodeError, Interpreter, IR, Limits}
@@ -405,7 +408,7 @@ defmodule Heddle do
 
   `continuation` receives the value `codec` decoded and returns the rest of
   the sequence. Sequences run inside `tuple_seq/2`; each continuation call
-  is charged one node. `Heddle.Syntax` gives the block form.
+  is charged one node. `Heddle.DSL.tuple_seq/2` gives the block form.
   """
   @spec bind(t(), (term() -> t())) :: t()
   def bind(codec, continuation) do
