@@ -66,6 +66,9 @@ reading data you stored before.
 - **It reads existing structs.** A struct codec that names every field
   reads the map `term_to_binary` writes for that struct. A choice between
   structs dispatches on the `:__struct__` key wherever it sits in the map.
+- **It reads terms from before a field existed.** A missing field decodes
+  to the struct's default, unless the struct enforces it. See
+  [Missing fields](#missing-fields).
 
 The supported types are atoms, booleans, `nil`, integers, floats, binaries,
 lists, charlists, tuples, maps and structs. Heddle rejects the rest on
@@ -237,6 +240,41 @@ serialized:
 - Decoding rejects input that contains it, and fills it from the struct's
   default.
 - To read structs that `term_to_binary` already wrote, name every field.
+
+### Missing fields
+
+A struct laid out as a map may be missing a field. That happens with terms
+written before the field was added. Heddle fills a missing field when
+either:
+
+- the field gives its own default, as `name: {codec, default: value}`; or
+- the struct doesn't list the field in `@enforce_keys`, and the field's
+  codec can encode the struct's default for it.
+
+```elixir
+defmodule MyApp.Account do
+  import Heddle.DSL
+
+  @enforce_keys [:id]
+  @derive {Heddle.Codec,
+           fields: [
+             id: integer(min: 1),
+             plan: enum([:free, :pro]),
+             email: one_of([null(), binary(max_size: 254)]),
+             name: binary(max_size: 100)
+           ]}
+  defstruct [:id, :email, :name, plan: :free]
+end
+```
+
+- `id` is required, because the struct enforces it.
+- `plan` may be missing, and decodes to `:free`.
+- `email` may be missing, and decodes to `nil`, since its codec accepts
+  `nil`.
+- `name` is required. Its default is `nil`, which `binary()` can't encode,
+  and a decoded struct must always encode again.
+
+A struct laid out as a tuple requires every field.
 
 ### Fields that depend on other fields
 

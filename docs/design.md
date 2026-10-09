@@ -189,7 +189,13 @@ Codec-declared bounds (for example `max: 100` on a list) and call-site bounds co
 ### Optional and defaulted fields
 
 - **Plain maps.** In `Heddle.map/1`, an absent `optional:` key is absent from the decoded map, and the encoder omits optional keys the value doesn't have.
-- **Struct layouts.** A struct field is required unless it declares `default:`. A defaulted field may be absent from the input and decodes to its default. The encoder always writes every serialized field, as `term_to_binary` does for a struct, so backward round-tripping holds, and when the codec serializes every field the VM decodes Heddle's output to a well-formed struct. Fields the codec does not serialize are neither written nor accepted; decoding fills them from the struct's own defaults.
+- **Struct layouts.** In the map layout, a serialized field may be absent from the input in two cases:
+  - It declares `default: value`, and decodes to `value`.
+  - The struct does not enforce it (`@enforce_keys`), and its codec encodes the struct's own default for it. It decodes to that default, which is `nil` for a field `defstruct` gives no value. This reads terms written before the field was added.
+
+  Every other field is required, and a tuple layout requires every field. The encoder always writes every serialized field, as `term_to_binary` does for a struct, so backward round-tripping holds, and when the codec serializes every field the VM decodes Heddle's output to a well-formed struct. Fields the codec does not serialize are neither written nor accepted; decoding fills them from the struct's own defaults.
+- **Defaults encode again.** A decoded struct must encode, so a default must be a value its codec accepts. `Heddle.struct/2` checks every default when the codec is built, for codecs with no functions, references or parameters (the closed ones): a struct default that fails leaves its field required, and a `default:` that fails is an H004 error. Codecs that are not closed are not run while being built, so their fields stay required unless they declare `default:`, which is then trusted.
+- **Where struct defaults come from.** Inside a Heddle macro, `Macro.struct_info!/2`, which waits for a struct still compiling and records the dependency; `defschema` records its own fields before its `defstruct` runs. At runtime, the struct module's `__struct__/0` and `__info__(:struct)`.
 
 ### Struct keys
 

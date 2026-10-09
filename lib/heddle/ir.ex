@@ -266,6 +266,73 @@ defmodule Heddle.IR do
     end
   end
 
+  @doc false
+  @spec struct_info!(module()) :: %{atom() => %{default: term(), required: boolean()}}
+  def struct_info!(module) do
+    info =
+      case {Process.get({:heddle_struct_info, module}), Heddle.Compiler.Expr.state()} do
+        {info, _} when is_list(info) -> info
+        {nil, %{env: %Macro.Env{} = env}} -> compile_time_struct_info!(module, env)
+        {nil, _} -> runtime_struct_info!(module)
+      end
+
+    Map.new(info, &{&1.field, %{default: &1.default, required: &1.required}})
+  end
+
+  # Inside a Heddle macro the struct may still be compiling (it is the one
+  # being derived, or a sibling), so ask the compiler, which waits for it
+  # and records the dependency.
+  defp compile_time_struct_info!(module, env) do
+    Macro.struct_info!(module, env)
+  rescue
+    ArgumentError -> not_a_struct!(module)
+  end
+
+  defp runtime_struct_info!(module) do
+    # ensure_compiled waits for a module the parallel compiler is still
+    # compiling, such as a struct named in a module attribute.
+    if match?({:module, _}, Code.ensure_compiled(module)) and
+         function_exported?(module, :__struct__, 0) do
+      defaults = module.__struct__()
+      Enum.map(module.__info__(:struct), &Map.put(&1, :default, Map.fetch!(defaults, &1.field)))
+    else
+      not_a_struct!(module)
+    end
+  end
+
+  defp not_a_struct!(module) do
+    raise CodecError, code: "H004", summary: "#{inspect(module)} is not a struct", labels: []
+  end
+
+  @doc """
+  Whether `codec` holds no functions, references or parameters, so its
+  encoder can run while the codec is being built.
+  """
+  @spec closed?(Heddle.t()) :: boolean()
+  def closed?(%Heddle{node: node}), do: closed_node?(node)
+
+  defp closed_node?({:literal, _}), do: true
+  defp closed_node?({:enum, _, _}), do: true
+  defp closed_node?(:existing_atom), do: true
+  defp closed_node?({:integer, _, _}), do: true
+  defp closed_node?(:char), do: true
+  defp closed_node?(:float), do: true
+  defp closed_node?({:binary, max, _}), do: bound?(max)
+  defp closed_node?({:list, elem, max}), do: bound?(max) and closed?(elem)
+  defp closed_node?({:tuple, elems}), do: Enum.all?(elems, &closed?/1)
+
+  defp closed_node?({:map, required, optional}),
+    do: Enum.all?(required ++ optional, fn {_, c} -> closed?(c) end)
+
+  defp closed_node?({:struct, _, _, fields}),
+    do: Enum.all?(fields, fn {_, c, _} -> closed?(c) end)
+
+  defp closed_node?({:map_of, k, v, max}), do: bound?(max) and closed?(k) and closed?(v)
+  defp closed_node?({:one_of, alts, _, _}), do: Enum.all?(alts, &closed?/1)
+  defp closed_node?(_), do: false
+
+  defp bound?(max), do: is_nil(max) or is_integer(max)
+
   ## Summaries
 
   @doc "The codec's FIRST set."

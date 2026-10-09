@@ -95,8 +95,10 @@ defmodule Heddle.Schema do
       end
 
   Options are `as: :map` (the default) or `as: :tuple`, and `tag:` for the
-  tuple layout. Each `field name, codec` is serialized; `default:` lets the
-  input omit it and sets the struct's default.
+  tuple layout. Each `field name, codec` is serialized; `default:` sets the
+  struct's default and lets the input omit the field. In the map layout, a
+  field without `default:` defaults to `nil`, so the input may omit it when
+  its codec encodes `nil`.
   """
   defmacro defschema(opts \\ [], do: block) do
     fields = fields!(block, __CALLER__)

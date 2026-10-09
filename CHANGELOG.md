@@ -28,6 +28,14 @@
 - `Heddle.DSL`, the constructors ready to import, with the `tuple_seq`
   block form and infix `<~`. It replaces `Heddle.Syntax`. `use
   Heddle.Schema` imports it, so codecs read `list(integer(), max: 16)`.
+- Struct codecs decode a missing field to the struct's own default when the
+  struct does not enforce it (`@enforce_keys`) and the field's codec
+  encodes that default, so terms written before a field was added still
+  read. `nil` defaults need a codec that accepts `nil`.
+- Struct defaults, explicit or from `defstruct`, are checked against their
+  codec when it is built (H004), so a decoded struct always encodes again.
+- A field `default: :__none__` is a default, not the absence of one.
+- `Heddle.struct/2` raises H004 when its module is not a struct.
 - The formatter exports `locals_without_parens` for `field`, `variant`,
   `defcodec`, `defschema`, `defunion`, `tuple_seq` and `pure`; add
   `import_deps: [:heddle]` to keep them paren-free.

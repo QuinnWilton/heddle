@@ -16,6 +16,12 @@ defmodule Heddle.Test.Point do
   defstruct x: 0, y: 0, label: nil, cache: :unset
 end
 
+defmodule Heddle.Test.Enforced do
+  @moduledoc false
+  @enforce_keys [:id]
+  defstruct [:id, note: nil]
+end
+
 defmodule Heddle.Test.Box do
   @moduledoc false
   defstruct [:contents, size: 1]

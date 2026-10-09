@@ -79,6 +79,14 @@ defmodule Heddle.Test.User do
   defstruct [:id, :name, :cache]
 end
 
+defmodule Heddle.Test.DerivedDefaults do
+  @moduledoc false
+  import Heddle.DSL
+
+  @derive {Heddle.Codec, fields: [id: integer(min: 1), role: enum([:admin, :guest])]}
+  defstruct [:id, role: :guest, cache: nil]
+end
+
 defmodule Heddle.Test.Team do
   @moduledoc false
   use Heddle.Schema

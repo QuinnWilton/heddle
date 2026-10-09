@@ -250,11 +250,28 @@ defmodule Heddle do
   A struct of `module`, laid out as a map (`as: :map`, the default) or a
   tuple (`as: :tuple`, with an optional leading `tag:` atom).
 
-  `fields:` lists every serialized field with its codec, or with
-  `{codec, default: value}` for a field the input may omit. Fields left out
-  are neither encoded nor accepted; decoding fills them from the struct's
-  defaults. The map layout matches the `:__struct__` key's value as a literal
-  naming `module`, and the encoder always writes every serialized field.
+  `fields:` lists every serialized field, as `name: codec`, or as
+  `name: {codec, default: value}` to give the field a default of its own.
+  Fields left out of `fields:` are neither encoded nor accepted, and
+  decoding fills them from the struct's defaults. The encoder always writes
+  every serialized field.
+
+  In the map layout, the input may omit a field when either:
+
+    * the field has `default: value`, and decodes to `value`; or
+    * the struct does not enforce the field (`@enforce_keys`), and the
+      field's codec encodes the struct's own default for it. The field then
+      decodes to that default, which is `nil` for a field `defstruct` gives
+      no value.
+
+  Any other field is required. A tuple layout reads every element, so every
+  field is required there.
+
+  A default must be a value its codec encodes, so a decoded struct always
+  encodes again. Heddle checks this when the codec is built, for codecs
+  with no functions or references in them; a struct default is used only
+  when the check passes, and a `default:` that fails it raises
+  `Heddle.CodecError`.
   """
   @spec struct(module(), as: :map | :tuple, tag: atom(), fields: keyword()) :: t(struct())
   def struct(module, opts) when is_atom(module) do
@@ -281,39 +298,66 @@ defmodule Heddle do
     if length(Enum.uniq(names)) != length(names),
       do: invalid!("Heddle.struct/2 lists a field twice: #{inspect(names)}")
 
-    check_struct_fields!(module, names)
+    info = IR.struct_info!(module)
+
+    case names -- Map.keys(info) do
+      [] -> :ok
+      missing -> invalid!("#{inspect(module)} has no fields #{inspect(missing)}")
+    end
+
+    Enum.each(fields, &check_default!(module, &1))
+    fields = if layout == :map, do: Enum.map(fields, &struct_default(info, &1)), else: fields
     %__MODULE__{node: {:struct, module, layout, fields}}
   end
 
   def struct(other, _), do: invalid!("Heddle.struct/2 expects a module, got #{inspect(other)}")
 
   defp struct_field!(name, {codec, field_opts}) when is_list(field_opts) do
-    field_opts = opts!(field_opts, [default: :__none__], "Heddle.struct/2 field #{inspect(name)}")
+    context = "Heddle.struct/2 field #{inspect(name)}"
+    opts!(field_opts, [default: nil], context)
 
     default =
-      case field_opts[:default] do
-        :__none__ -> :none
-        value -> {:ok, value}
+      case Keyword.fetch(field_opts, :default) do
+        {:ok, value} -> {:ok, value}
+        :error -> :none
       end
 
-    {IR.codec!(codec, "Heddle.struct/2 field #{inspect(name)}"), default}
+    {IR.codec!(codec, context), default}
   end
 
   defp struct_field!(name, codec),
     do: {IR.codec!(codec, "Heddle.struct/2 field #{inspect(name)}"), :none}
 
-  defp check_struct_fields!(module, names) do
-    if Code.ensure_loaded?(module) and function_exported?(module, :__struct__, 0) do
-      known = module.__struct__() |> Map.keys()
+  # A field the struct does not enforce takes the struct's own default when
+  # the input omits it, as an ordinary `{:ok, value}` default every backend
+  # already handles. A default the codec cannot encode would decode to a
+  # struct that does not encode again, so such a field stays required.
+  defp struct_default(info, {name, codec, :none} = field) do
+    %{required: required, default: default} = Map.fetch!(info, name)
 
-      case names -- known do
-        [] -> :ok
-        missing -> invalid!("#{inspect(module)} has no fields #{inspect(missing)}")
-      end
+    if not required and IR.closed?(codec) and conforms?(codec, default),
+      do: {name, codec, {:ok, default}},
+      else: field
+  end
+
+  defp struct_default(_info, field), do: field
+
+  defp check_default!(module, {name, codec, {:ok, default}}) do
+    if IR.closed?(codec) and not conforms?(codec, default) do
+      raise CodecError,
+        code: "H004",
+        summary:
+          "Heddle.struct/2 field #{inspect(name)} of #{inspect(module)} defaults to " <>
+            "#{inspect(default, limit: 10, printable_limit: 64)}, which its codec cannot encode",
+        labels: [{codec, "this codec rejects the default"}],
+        help:
+          "a decoded struct must encode again: use a default the codec accepts, or widen the codec"
     end
 
     :ok
   end
+
+  defp check_default!(_module, _field), do: :ok
 
   ## Combinators
 

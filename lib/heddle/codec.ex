@@ -13,7 +13,8 @@ defprotocol Heddle.Codec do
 
   Options are those of `Heddle.struct/2`. Every serialized field needs an
   explicit codec; a field left out of `fields:` is neither encoded nor
-  accepted. The protocol is resolved on the module named at the call site,
+  accepted. A field the struct does not enforce may be missing from the
+  input when its codec encodes the field's `defstruct` default. The protocol is resolved on the module named at the call site,
   never on decoded data.
 
   Derive codecs only for structs you own: a struct can have one

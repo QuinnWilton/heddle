@@ -230,6 +230,101 @@ defmodule HeddleTest do
                error(codec, t2b(%{x: 1}))
     end
 
+    test "unenforced fields may be missing when the codec encodes their default" do
+      codec =
+        Heddle.struct(Heddle.Test.Point,
+          fields: [
+            x: Heddle.integer(),
+            label: Heddle.one_of([Heddle.null(), Heddle.binary()])
+          ]
+        )
+
+      assert {:ok, %Heddle.Test.Point{x: 0, label: nil, cache: :unset}} =
+               Heddle.decode(codec, t2b(%{__struct__: Heddle.Test.Point}))
+
+      assert {:ok, %Heddle.Test.Point{x: 3, label: "a"}} =
+               Heddle.decode(codec, t2b(%{__struct__: Heddle.Test.Point, x: 3, label: "a"}))
+
+      assert :erlang.binary_to_term(enc!(codec, %Heddle.Test.Point{})) ==
+               %{__struct__: Heddle.Test.Point, x: 0, label: nil}
+    end
+
+    test "a field stays required when its codec cannot encode the struct's default" do
+      # label defaults to nil, which a binary codec rejects.
+      codec = Heddle.struct(Heddle.Test.Point, fields: [label: Heddle.binary()])
+
+      assert %DecodeError{reason: :missing_key, expected: [key: :label]} =
+               error(codec, t2b(%{__struct__: Heddle.Test.Point}))
+
+      # A codec with functions in it is not run while it is built.
+      codec =
+        Heddle.struct(Heddle.Test.Point,
+          fields: [label: Heddle.lazy(fn -> Heddle.one_of([Heddle.null(), Heddle.binary()]) end)]
+        )
+
+      assert %DecodeError{reason: :missing_key} =
+               error(codec, t2b(%{__struct__: Heddle.Test.Point}))
+    end
+
+    test "enforced fields are required" do
+      codec =
+        Heddle.struct(Heddle.Test.Enforced,
+          fields: [
+            id: Heddle.one_of([Heddle.null(), Heddle.integer()]),
+            note: Heddle.one_of([Heddle.null(), Heddle.binary()])
+          ]
+        )
+
+      assert {:ok, %Heddle.Test.Enforced{id: 1, note: nil}} =
+               Heddle.decode(codec, t2b(%{__struct__: Heddle.Test.Enforced, id: 1}))
+
+      assert %DecodeError{reason: :missing_key, expected: [key: :id]} =
+               error(codec, t2b(%{__struct__: Heddle.Test.Enforced, note: "n"}))
+    end
+
+    test "a tuple layout requires every field" do
+      codec =
+        Heddle.struct(Heddle.Test.Point,
+          as: :tuple,
+          fields: [x: Heddle.integer(), y: Heddle.integer()]
+        )
+
+      assert {:error, %DecodeError{}} = Heddle.decode(codec, t2b({1}))
+    end
+
+    test "an explicit default may be any value, including :__none__" do
+      codec =
+        Heddle.struct(Heddle.Test.Box,
+          fields: [contents: {Heddle.enum([:__none__, :some]), default: :__none__}]
+        )
+
+      assert {:ok, %Heddle.Test.Box{contents: :__none__}} =
+               Heddle.decode(codec, t2b(%{__struct__: Heddle.Test.Box}))
+    end
+
+    test "explicit defaults must be values the codec encodes" do
+      assert_raise Heddle.CodecError, ~r/defaults to 5, which its codec cannot encode/, fn ->
+        Heddle.struct(Heddle.Test.Point, fields: [label: {Heddle.binary(), default: 5}])
+      end
+    end
+
+    test "the module must be a struct" do
+      assert_raise Heddle.CodecError, ~r/Enum is not a struct/, fn ->
+        Heddle.struct(Enum, fields: [x: Heddle.integer()])
+      end
+    end
+
+    test "derived codecs read the defstruct defaults" do
+      module = Heddle.Test.DerivedDefaults
+      codec = Heddle.codec_for(module)
+
+      assert {:ok, %{id: 1, role: :guest}} =
+               Heddle.decode(codec, t2b(%{__struct__: module, id: 1}))
+
+      assert {:ok, %{id: 1, role: :admin}} =
+               Heddle.decode(codec, t2b(%{__struct__: module, id: 1, role: :admin}))
+    end
+
     test "the encoder writes every serialized field" do
       codec =
         Heddle.struct(Heddle.Test.Point,

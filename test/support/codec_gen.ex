@@ -157,11 +157,15 @@ defmodule Heddle.Test.CodecGen do
   defp g_struct(depth) do
     gen all layout <- StreamData.member_of([:map, :tuple, :tagged]),
             x <- codec_ast(depth - 1),
-            default <- StreamData.boolean() do
+            default <- StreamData.member_of([:none, :explicit, :nullable]) do
+      # Heddle.Test.Point's label defaults to nil, so a nullable label may be
+      # missing from a map, while a plain binary label is required.
       label =
-        if default,
-          do: quote(do: {Heddle.binary(max_size: 8), default: "none"}),
-          else: quote(do: Heddle.binary(max_size: 8))
+        case default do
+          :none -> quote(do: Heddle.binary(max_size: 8))
+          :explicit -> quote(do: {Heddle.binary(max_size: 8), default: "none"})
+          :nullable -> quote(do: Heddle.one_of([Heddle.null(), Heddle.binary(max_size: 8)]))
+        end
 
       fields = [x: x, label: label]
 
