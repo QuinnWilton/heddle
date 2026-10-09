@@ -76,7 +76,8 @@ defmodule Heddle.DSLTest do
       stderr =
         capture_io(:stderr, fn -> send(self(), {:compiled, Code.compile_string(source)}) end)
 
-      assert stderr == ""
+      # stderr is global, so async tests may write to it too.
+      refute stderr =~ "Heddle.Test.DSLFinite"
       assert_received {:compiled, [{module, _}]}
       assert Heddle.lint(module.c()) == []
       round_trip!(module.c(), [%{v: 1, body: "abc"}, %{v: 2, body: [1, 2]}])
