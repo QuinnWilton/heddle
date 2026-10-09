@@ -222,7 +222,7 @@ defmodule MyApp.Codecs do
   use Heddle.Schema
 
   defcodec uri do
-    Heddle.struct(URI, fields: [scheme: enum([:http, :https], unknown: :keep), host: binary(max_size: 253)])
+    Heddle.struct(URI, fields: [scheme: binary(max_size: 16), host: binary(max_size: 253)])
   end
 end
 ```
